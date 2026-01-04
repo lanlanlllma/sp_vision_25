@@ -64,11 +64,8 @@ SerialCode Serial::open(std::string port, std::shared_ptr<SPconfig> config, size
 #else
     try {
         // 使用纯 C++ 串口库，配置为常用的 115200 波特率
-        serial_raw_ = std::make_unique<serial::Serial>(
-            port,
-            115200,
-            serial::Timeout::simpleTimeout(100)
-        );
+        serial_raw_ =
+            std::make_unique<serial::Serial>(port, 115200, serial::Timeout::simpleTimeout(100));
     } catch (const std::exception&) {
         return SerialCode::Value::OPEN_FAIL;
     }
@@ -106,7 +103,7 @@ SerialCode Serial::close() {
     }
     this->bytes_ = 0;
     return this->serial_port_ && this->serial_port_->is_open() ? SerialCode::Value::CLOSE_FAIL
-                                                                : SerialCode::Value::OK;
+                                                               : SerialCode::Value::OK;
 #else
     if (this->serial_raw_ && this->serial_raw_->isOpen()) {
         try {

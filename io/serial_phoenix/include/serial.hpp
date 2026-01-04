@@ -4,9 +4,9 @@
 #include <mutex>
 
 #ifndef SP_VISION_HAVE_SERIAL_DRIVER
-#include <serial/serial.h>
+    #include <serial/serial.h>
 #else
-#include <serial_driver/serial_driver.hpp>
+    #include <serial_driver/serial_driver.hpp>
 #endif
 
 namespace serial_phoenix {
@@ -15,8 +15,7 @@ namespace serial_phoenix {
 using SPconfig = drivers::serial_driver::SerialPortConfig;
 #else
 // 纯 C++ 后端下的占位配置类型，目前内部不会使用
-struct SPconfig {
-};
+struct SPconfig {};
 #endif
 
 struct SerialCode {
