@@ -3,12 +3,26 @@ inline SerialCode Serial::read_unsafe(std::vector<uint8_t>& out) {
     if (!this->is_open()) {
         return SerialCode::Value::READ_NOT_OPENED;
     }
+
+#ifdef SP_VISION_HAVE_SERIAL_DRIVER
     try {
         this->read_buffer_.resize(out.size());
         this->bytes_ = this->serial_port_->receive(this->read_buffer_);
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         return SerialCode::Value::READ_FAIL;
     }
+#else
+    try {
+        if (!this->serial_raw_) {
+            return SerialCode::Value::READ_NOT_OPENED;
+        }
+        this->read_buffer_.resize(out.size());
+        this->bytes_ = this->serial_raw_->read(this->read_buffer_.data(), out.size());
+    } catch (const std::exception&) {
+        return SerialCode::Value::READ_FAIL;
+    }
+#endif
+
     if (this->bytes_ != out.size()) {
         return SerialCode::Value::READ_BYTE_MISMATCH;
     }
@@ -30,12 +44,25 @@ inline SerialCode Serial::read_unsafe(T& out) {
     if (!this->is_open()) {
         return SerialCode::Value::READ_NOT_OPENED;
     }
+
+#ifdef SP_VISION_HAVE_SERIAL_DRIVER
     try {
         this->read_buffer_.resize(sizeof(T));
         this->bytes_ = this->serial_port_->receive(this->read_buffer_);
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         return SerialCode::Value::READ_FAIL;
     }
+#else
+    try {
+        if (!this->serial_raw_) {
+            return SerialCode::Value::READ_NOT_OPENED;
+        }
+        this->read_buffer_.resize(sizeof(T));
+        this->bytes_ = this->serial_raw_->read(this->read_buffer_.data(), sizeof(T));
+    } catch (const std::exception&) {
+        return SerialCode::Value::READ_FAIL;
+    }
+#endif
 
     if (this->bytes_ != sizeof(T)) {
         return SerialCode::Value::READ_BYTE_MISMATCH;
@@ -57,13 +84,32 @@ inline SerialCode Serial::write_unsafe(std::vector<uint8_t>& in) {
     if (!this->is_open()) {
         return SerialCode::Value::WRITE_NOT_OPENED;
     }
+
+#ifdef SP_VISION_HAVE_SERIAL_DRIVER
     try {
         this->write_buffer_.resize(in.size());
         std::memcpy(this->write_buffer_.data(), in.data(), in.size());
         this->serial_port_->send(this->write_buffer_);
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         return SerialCode::Value::WRITE_FAIL;
     }
+#else
+    try {
+        if (!this->serial_raw_) {
+            return SerialCode::Value::WRITE_NOT_OPENED;
+        }
+        this->write_buffer_.resize(in.size());
+        std::memcpy(this->write_buffer_.data(), in.data(), in.size());
+        this->bytes_ = this->serial_raw_->write(this->write_buffer_.data(), in.size());
+    } catch (const std::exception&) {
+        return SerialCode::Value::WRITE_FAIL;
+    }
+
+    if (this->bytes_ != in.size()) {
+        return SerialCode::Value::WRITE_BYTE_MISMATCH;
+    }
+#endif
+
     return SerialCode::Value::OK;
 }
 
@@ -81,13 +127,32 @@ inline SerialCode Serial::write_unsafe(T&& in) {
     if (!this->is_open()) {
         return SerialCode::Value::WRITE_NOT_OPENED;
     }
+
+#ifdef SP_VISION_HAVE_SERIAL_DRIVER
     try {
         this->write_buffer_.resize(sizeof(T));
         std::memcpy(this->write_buffer_.data(), &in, sizeof(T));
         this->serial_port_->send(this->write_buffer_);
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         return SerialCode::Value::WRITE_FAIL;
     }
+#else
+    try {
+        if (!this->serial_raw_) {
+            return SerialCode::Value::WRITE_NOT_OPENED;
+        }
+        this->write_buffer_.resize(sizeof(T));
+        std::memcpy(this->write_buffer_.data(), &in, sizeof(T));
+        this->bytes_ = this->serial_raw_->write(this->write_buffer_.data(), sizeof(T));
+    } catch (const std::exception&) {
+        return SerialCode::Value::WRITE_FAIL;
+    }
+
+    if (this->bytes_ != sizeof(T)) {
+        return SerialCode::Value::WRITE_BYTE_MISMATCH;
+    }
+#endif
+
     return SerialCode::Value::OK;
 }
 

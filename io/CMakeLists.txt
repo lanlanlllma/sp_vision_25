@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
 find_package(yaml-cpp REQUIRED)
-find_package(serial_driver REQUIRED)
+find_package(serial_driver QUIET)
+find_package(ament_cmake QUIET)
 
 add_subdirectory(serial)
 
@@ -39,11 +40,17 @@ endif()
 
 target_link_libraries(io MvCameraControl MVSDK usb-1.0 yaml-cpp serial)
 
-# serial_driver 是 ament 包，需要用 ament_target_dependencies 设置 include 和链接
-ament_target_dependencies(io serial_driver)
+# serial_driver 是 ament 包，存在且 ament 可用时，启用 ROS2 后端
+# if(serial_driver_FOUND AND ament_cmake_FOUND)
+if(0)
+  ament_target_dependencies(io serial_driver)
+  target_compile_definitions(io PUBLIC SP_VISION_HAVE_SERIAL_DRIVER=1)
+  message(STATUS "serial_derver found, using ros2 backend.")
+else()
+  message(STATUS "serial_driver or ament_cmake not found, using pure C++ serial backend.")
+endif()
 
 ################## 检查 ROS 环境 ##################
-find_package(ament_cmake QUIET)
 find_package(rclcpp QUIET)
 find_package(std_msgs QUIET)
 find_package(rosidl_typesupport_cpp QUIET)

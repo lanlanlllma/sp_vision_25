@@ -1,12 +1,23 @@
 #pragma once
 
 #include <filesystem>
+#include <mutex>
 
+#ifndef SP_VISION_HAVE_SERIAL_DRIVER
+#include <serial/serial.h>
+#else
 #include <serial_driver/serial_driver.hpp>
+#endif
 
 namespace serial_phoenix {
 
+#ifdef SP_VISION_HAVE_SERIAL_DRIVER
 using SPconfig = drivers::serial_driver::SerialPortConfig;
+#else
+// 纯 C++ 后端下的占位配置类型，目前内部不会使用
+struct SPconfig {
+};
+#endif
 
 struct SerialCode {
     // 串口操作返回码
@@ -78,24 +89,9 @@ public:
     Serial(const Serial&)            = delete;
     Serial& operator=(const Serial&) = delete;
 
-    // 启用移动构造与赋值(未测试)
-    Serial(Serial&& other) noexcept:
-        owned_ctx_(std::move(other.owned_ctx_)),
-        serial_port_(std::move(other.serial_port_)),
-        read_buffer_(std::move(other.read_buffer_)),
-        write_buffer_(std::move(other.write_buffer_)),
-        bytes_(other.bytes_) {}
-
-    Serial& operator=(Serial&& other) noexcept {
-        if (this != &other) {
-            owned_ctx_    = std::move(other.owned_ctx_);
-            serial_port_  = std::move(other.serial_port_);
-            read_buffer_  = std::move(other.read_buffer_);
-            write_buffer_ = std::move(other.write_buffer_);
-            bytes_        = other.bytes_;
-        }
-        return *this;
-    }
+    // 启用移动构造与赋值（自定义实现，避免移动 mutex）
+    Serial(Serial&& other) noexcept;
+    Serial& operator=(Serial&& other) noexcept;
 
     /**
      * @brief 打开串口
@@ -183,8 +179,13 @@ public:
 
 private:
     // 串口对象
+#ifdef SP_VISION_HAVE_SERIAL_DRIVER
     std::unique_ptr<IoContext> owned_ctx_;                            // 控制异步io线程数
     std::shared_ptr<drivers::serial_driver::SerialPort> serial_port_; // 串口
+#else
+    // 纯 C++ 串口实现
+    std::unique_ptr<serial::Serial> serial_raw_;
+#endif
 
     // 缓冲区
     std::vector<uint8_t> read_buffer_;  // 读缓冲区
