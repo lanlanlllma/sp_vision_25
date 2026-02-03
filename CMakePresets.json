@@ -1,0 +1,15 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "aarch64-release",
+            "displayName": "AArch64 Release",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/aarch64-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/aarch64.toolchain.cmake"
+            }
+        }
+    ]
+}
