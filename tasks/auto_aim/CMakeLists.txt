@@ -18,6 +18,7 @@ add_library(auto_aim OBJECT
     shooter.cpp
     yolo.cpp
     yolos/yolov5.cpp
+    yolos/yolov5_rknn.cpp
     yolos/yolov8.cpp
     yolos/yolo11.cpp
     multithread/commandgener.cpp

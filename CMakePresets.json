@@ -8,7 +8,7 @@
             "binaryDir": "${sourceDir}/build/aarch64-release",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/aarch64.toolchain.cmake"
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/toolchain-aarch64.cmake"
             }
         }
     ]
