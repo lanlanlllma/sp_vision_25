@@ -10,6 +10,16 @@
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/toolchain-aarch64.cmake"
             }
+        },
+        {
+            "name": "aarch64-debug",
+            "displayName": "aarch64 Debug",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/aarch64-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/toolchain-aarch64.cmake"
+            }
         }
     ]
 }
