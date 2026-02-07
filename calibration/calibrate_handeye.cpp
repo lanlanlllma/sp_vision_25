@@ -80,7 +80,7 @@ void load(
     // 显示识别结果
     cv::drawChessboardCorners(drawing, pattern_size, centers_2d, success);
     cv::resize(drawing, drawing, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
-    cv::imshow("Press any to continue", drawing);
+    //cv::imshow("Press any to continue", drawing);
     cv::waitKey(0);
 
     // 输出识别结果

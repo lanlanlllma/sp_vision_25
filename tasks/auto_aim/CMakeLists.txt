@@ -24,8 +24,4 @@ add_library(auto_aim OBJECT
     multithread/mt_detector.cpp
     planner/planner.cpp
 )
-if(USE_CROSS_COMPILER)
-    target_link_libraries(auto_aim io openvino::runtime tinympcstatic ${RKNN_LIBRARY})
-else()  
-target_link_libraries(auto_aim io openvino::runtime tinympcstatic)
-endif()
+target_link_libraries(auto_aim io openvino::runtime tinympcstatic ${RKNN_LIBRARY})

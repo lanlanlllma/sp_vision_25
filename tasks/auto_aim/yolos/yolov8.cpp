@@ -290,7 +290,7 @@ void YOLOV8::draw_detections(
     cv::rectangle(detection, roi_, green, 2);
   }
   cv::resize(detection, detection, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
-  cv::imshow("detection", detection);
+  //cv::imshow("detection", detection);
 }
 
 void YOLOV8::sort_keypoints(std::vector<cv::Point2f> & keypoints)

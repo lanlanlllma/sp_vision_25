@@ -62,7 +62,7 @@ int main(int argc, char * argv[])
 
       plotter.plot(data);
       // cv::resize(img, img, {}, 0.5, 0.5);
-      // cv::imshow("reprojection", img);
+      // //cv::imshow("reprojection", img);
     }
   });
 

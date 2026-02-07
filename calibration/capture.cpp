@@ -50,7 +50,7 @@ void capture_loop(
     cv::resize(img_with_ypr, img_with_ypr, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
 
     // 按“s”保存图片和对应四元数，按“q”退出程序
-    cv::imshow("Press s to save, q to quit", img_with_ypr);
+    //cv::imshow("Press s to save, q to quit", img_with_ypr);
     auto key = cv::waitKey(1);
     if (key == 'q')
       break;

@@ -1,10 +1,17 @@
 #ifndef AUTO_AIM__YOLOV5_RKNN_HPP
 #define AUTO_AIM__YOLOV5_RKNN_HPP
 
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <future>
 #include <list>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <rknn_api.h>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "tasks/auto_aim/armor.hpp"
@@ -25,6 +32,32 @@ public:
     double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count) override;
 
 private:
+  struct RknnContext
+  {
+    rknn_context ctx = 0;
+    rknn_input_output_num io_num{};
+    std::vector<rknn_tensor_attr> input_attrs;
+    std::vector<rknn_tensor_attr> output_attrs;
+  };
+
+  struct InferResult
+  {
+    bool ok = false;
+    size_t ctx_index = 0;
+    int rows = 0;
+    int cols = 0;
+    long long infer_us = 0;
+    std::vector<float> output;
+  };
+
+  struct InferJob
+  {
+    cv::Mat input_rgb;
+    std::promise<InferResult> promise;
+  };
+
+  static constexpr size_t kRknnContextCount = 3;
+
   std::string model_path_;
   std::string save_path_, debug_path_;
   bool debug_, use_roi_, use_traditional_;
@@ -41,10 +74,15 @@ private:
   Detector detector_;
   friend class MultiThreadDetector;
 
-  rknn_context ctx_ = 0;
-  rknn_input_output_num io_num_{};
-  std::vector<rknn_tensor_attr> input_attrs_;
-  std::vector<rknn_tensor_attr> output_attrs_;
+  std::array<RknnContext, kRknnContextCount> ctxs_{};
+  std::atomic<uint32_t> next_ctx_{0};
+
+  std::array<std::thread, kRknnContextCount> workers_{};
+  std::mutex queue_mu_;
+  std::condition_variable queue_cv_;
+  std::deque<InferJob> job_queue_;
+  bool stop_workers_ = false;
+  bool workers_started_ = false;
 
   bool check_name(const Armor & armor) const;
   bool check_type(const Armor & armor) const;
@@ -58,8 +96,12 @@ private:
   double sigmoid(double x);
 
   bool init_rknn(const std::string & model_path);
-  bool infer(const cv::Mat & img_rgb_u8, std::vector<rknn_output> & outputs);
-  void release_outputs(std::vector<rknn_output> & outputs);
+  void start_workers();
+  void stop_workers();
+  void worker_loop(size_t ctx_index);
+  bool infer(
+    const cv::Mat & img_rgb_u8, std::vector<rknn_output> & outputs, size_t ctx_index);
+  void release_outputs(std::vector<rknn_output> & outputs, size_t ctx_index);
   static bool read_file(const std::string & path, std::vector<uint8_t> & data);
 };
 

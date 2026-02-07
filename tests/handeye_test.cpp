@@ -69,7 +69,7 @@ int main(int argc, char * argv[])
     tools::draw_text(result, fmt::format("pitch {:.2f}", euler[1]), {40, 80}, {0, 0, 255});
     tools::draw_text(result, fmt::format("roll  {:.2f}", euler[2]), {40, 120}, {0, 0, 255});
     if (!display) continue;
-    cv::imshow("result", result);
+    //cv::imshow("result", result);
     if (cv::waitKey(1) == 'q') break;
   }
 }

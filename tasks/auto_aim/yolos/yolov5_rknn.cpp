@@ -4,6 +4,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 
@@ -17,6 +18,19 @@ namespace
 constexpr int kInputSize = 640;
 constexpr int kOutputCols = 22;
 constexpr int kOutputRowsFallback = 25200;
+
+inline double SigmoidFast(double x)
+{
+  x = std::max(-50.0, std::min(50.0, x));
+  return 1.0 / (1.0 + std::exp(-x));
+}
+
+inline double LogitClamp(double p)
+{
+  constexpr double kEps = 1e-6;
+  p = std::max(kEps, std::min(1.0 - kEps, p));
+  return std::log(p / (1.0 - p));
+}
 }  // namespace
 
 YOLOV5_RKNN::YOLOV5_RKNN(const std::string & config_path, bool debug)
@@ -48,13 +62,18 @@ YOLOV5_RKNN::YOLOV5_RKNN(const std::string & config_path, bool debug)
   if (!init_rknn(model_path_)) {
     throw std::runtime_error("Failed to init RKNN model: " + model_path_);
   }
+
+  start_workers();
 }
 
 YOLOV5_RKNN::~YOLOV5_RKNN()
 {
-  if (ctx_ != 0) {
-    rknn_destroy(ctx_);
-    ctx_ = 0;
+  stop_workers();
+  for (auto & ctx_item : ctxs_) {
+    if (ctx_item.ctx != 0) {
+      rknn_destroy(ctx_item.ctx);
+      ctx_item.ctx = 0;
+    }
   }
 }
 
@@ -64,6 +83,8 @@ std::list<Armor> YOLOV5_RKNN::detect(const cv::Mat & raw_img, int frame_count)
     tools::logger()->warn("Empty img!, camera drop!");
     return std::list<Armor>();
   }
+
+  const auto t_begin = std::chrono::steady_clock::now();
 
   cv::Mat bgr_img;
   if (use_roi_) {
@@ -92,98 +113,188 @@ std::list<Armor> YOLOV5_RKNN::detect(const cv::Mat & raw_img, int frame_count)
   cv::Mat input_rgb;
   cv::cvtColor(input, input_rgb, cv::COLOR_BGR2RGB);
 
-  std::vector<rknn_output> outputs;
-  if (!infer(input_rgb, outputs)) {
-    release_outputs(outputs);
-    return std::list<Armor>();
-  }
+  const auto t_pre_end = std::chrono::steady_clock::now();
 
-  const float *out0 = nullptr;
-  int rows = 0;
-  int cols = 0;
-  if (!output_attrs_.empty()) {
-    const auto & out_attr = output_attrs_.front();
-    if (out_attr.n_dims >= 3) {
-      rows = static_cast<int>(out_attr.dims[1]);
-      cols = static_cast<int>(out_attr.dims[2]);
+  const auto t_submit = std::chrono::steady_clock::now();
+
+  InferResult result;
+  if (workers_started_) {
+    InferJob job;
+    job.input_rgb = input_rgb;
+    auto fut = job.promise.get_future();
+    {
+      std::lock_guard<std::mutex> lk(queue_mu_);
+      job_queue_.push_back(std::move(job));
     }
-  }
-  if (rows <= 0 || cols <= 0) {
-    rows = kOutputRowsFallback;
-    cols = kOutputCols;
+    queue_cv_.notify_one();
+    result = fut.get();
+  } else {
+    const size_t ctx_index =
+      static_cast<size_t>(next_ctx_.fetch_add(1, std::memory_order_relaxed) % kRknnContextCount);
+    std::vector<rknn_output> outputs;
+    if (!infer(input_rgb, outputs, ctx_index)) {
+      release_outputs(outputs, ctx_index);
+      return std::list<Armor>();
+    }
+
+    const float *out0 = nullptr;
+    int rows = 0;
+    int cols = 0;
+    if (!ctxs_[ctx_index].output_attrs.empty()) {
+      const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
+      if (out_attr.n_dims >= 3) {
+        rows = static_cast<int>(out_attr.dims[1]);
+        cols = static_cast<int>(out_attr.dims[2]);
+      }
+    }
+    if (rows <= 0 || cols <= 0) {
+      rows = kOutputRowsFallback;
+      cols = kOutputCols;
+    }
+
+    if (!outputs.empty()) {
+      out0 = reinterpret_cast<const float *>(outputs[0].buf);
+    }
+    if (!out0) {
+      tools::logger()->error("RKNN output buffer is null");
+      release_outputs(outputs, ctx_index);
+      return std::list<Armor>();
+    }
+
+    result.ok = true;
+    result.ctx_index = ctx_index;
+    result.rows = rows;
+    result.cols = cols;
+    result.output.assign(out0, out0 + static_cast<size_t>(rows) * static_cast<size_t>(cols));
+    release_outputs(outputs, ctx_index);
   }
 
-  if (!outputs.empty()) {
-    out0 = reinterpret_cast<const float *>(outputs[0].buf);
-  }
-  if (!out0) {
-    tools::logger()->error("RKNN output buffer is null");
-    release_outputs(outputs);
+  const auto t_infer_end = std::chrono::steady_clock::now();
+
+  if (!result.ok || result.output.empty() || result.rows <= 0 || result.cols <= 0) {
+    tools::logger()->error("RKNN output is empty");
     return std::list<Armor>();
   }
 
-  cv::Mat output(rows, cols, CV_32F, const_cast<float *>(out0));
+  cv::Mat output(result.rows, result.cols, CV_32F, result.output.data());
   auto armors = parse(scale, output, raw_img, frame_count);
 
-  release_outputs(outputs);
+  const auto t_post_end = std::chrono::steady_clock::now();
+
+  if (debug_) {
+    const auto pre_ms =
+      std::chrono::duration<double, std::milli>(t_pre_end - t_begin).count();
+    const auto wait_ms =
+      std::chrono::duration<double, std::milli>(t_infer_end - t_submit).count();
+    const auto infer_ms = result.infer_us / 1000.0;
+    const auto post_ms =
+      std::chrono::duration<double, std::milli>(t_post_end - t_infer_end).count();
+    const auto total_ms =
+      std::chrono::duration<double, std::milli>(t_post_end - t_begin).count();
+
+    tools::logger()->debug(
+      "[YOLOV5_RKNN] frame={} ctx={} pre={:.3f}ms wait={:.3f}ms infer={:.3f}ms post={:.3f}ms total={:.3f}ms rows={} cols={}",
+      frame_count, result.ctx_index, pre_ms, wait_ms, infer_ms, post_ms, total_ms,
+      result.rows, result.cols);
+  }
   return armors;
 }
 
 std::list<Armor> YOLOV5_RKNN::parse(
   double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count)
 {
-  // for each row: xywh + classess
-  std::vector<int> color_ids, num_ids;
-  std::vector<float> confidences;
-  std::vector<cv::Rect> boxes;
-  std::vector<std::vector<cv::Point2f>> armors_key_points;
-  for (int r = 0; r < output.rows; r++) {
-    double score = output.at<float>(r, 8);
-    score = sigmoid(score);
+  // for each row: kpts + conf + color(4) + num(9)
+  thread_local std::vector<int> color_ids_buf;
+  thread_local std::vector<int> num_ids_buf;
+  thread_local std::vector<float> confidences_buf;
+  thread_local std::vector<cv::Rect> boxes_buf;
+  thread_local std::vector<std::vector<cv::Point2f>> armors_key_points_buf;
 
-    if (score < score_threshold_) continue;
+  auto & color_ids = color_ids_buf;
+  auto & num_ids = num_ids_buf;
+  auto & confidences = confidences_buf;
+  auto & boxes = boxes_buf;
+  auto & armors_key_points = armors_key_points_buf;
+
+  color_ids.clear();
+  num_ids.clear();
+  confidences.clear();
+  boxes.clear();
+  armors_key_points.clear();
+
+  const int rows = output.rows;
+  const int cols = output.cols;
+  if (rows <= 0 || cols <= 0) {
+    return std::list<Armor>();
+  }
+
+  const float inv_scale = static_cast<float>(1.0 / scale);
+
+  color_ids.reserve(rows);
+  num_ids.reserve(rows);
+  confidences.reserve(rows);
+  boxes.reserve(rows);
+  armors_key_points.reserve(rows);
+
+  const double conf_logit_thresh = LogitClamp(score_threshold_);
+
+  for (int r = 0; r < rows; ++r) {
+    const float *p = output.ptr<float>(r);
+    const double conf_logit = static_cast<double>(p[8]);
+    if (conf_logit < conf_logit_thresh) {
+      continue;
+    }
+    const float score = static_cast<float>(SigmoidFast(conf_logit));
+    if (score < score_threshold_) {
+      continue;
+    }
+
+    // color argmax (9..12)
+    int color_id = 0;
+    float best_color = p[9];
+    for (int j = 10; j < 13; ++j) {
+      if (p[j] > best_color) {
+        best_color = p[j];
+        color_id = j - 9;
+      }
+    }
+    // num argmax (13..21)
+    int class_id = 0;
+    float best_num = p[13];
+    for (int j = 14; j < 22; ++j) {
+      if (p[j] > best_num) {
+        best_num = p[j];
+        class_id = j - 13;
+      }
+    }
 
     std::vector<cv::Point2f> armor_key_points;
-
-    //颜色和类别独热向量
-    cv::Mat color_scores = output.row(r).colRange(9, 13);     //color
-    cv::Mat classes_scores = output.row(r).colRange(13, 22);  //num
-    cv::Point class_id, color_id;
-    int _class_id, _color_id;
-    double score_color, score_num;
-    cv::minMaxLoc(classes_scores, NULL, &score_num, NULL, &class_id);
-    cv::minMaxLoc(color_scores, NULL, &score_color, NULL, &color_id);
-    _class_id = class_id.x;
-    _color_id = color_id.x;
-
-    armor_key_points.push_back(
-      cv::Point2f(output.at<float>(r, 0) / scale, output.at<float>(r, 1) / scale));
-    armor_key_points.push_back(
-      cv::Point2f(output.at<float>(r, 6) / scale, output.at<float>(r, 7) / scale));
-    armor_key_points.push_back(
-      cv::Point2f(output.at<float>(r, 4) / scale, output.at<float>(r, 5) / scale));
-    armor_key_points.push_back(
-      cv::Point2f(output.at<float>(r, 2) / scale, output.at<float>(r, 3) / scale));
+    armor_key_points.resize(4);
+    armor_key_points[0] = cv::Point2f(p[0] * inv_scale, p[1] * inv_scale);
+    armor_key_points[1] = cv::Point2f(p[6] * inv_scale, p[7] * inv_scale);
+    armor_key_points[2] = cv::Point2f(p[4] * inv_scale, p[5] * inv_scale);
+    armor_key_points[3] = cv::Point2f(p[2] * inv_scale, p[3] * inv_scale);
 
     float min_x = armor_key_points[0].x;
     float max_x = armor_key_points[0].x;
     float min_y = armor_key_points[0].y;
     float max_y = armor_key_points[0].y;
 
-    for (int i = 1; i < armor_key_points.size(); i++) {
-      if (armor_key_points[i].x < min_x) min_x = armor_key_points[i].x;
-      if (armor_key_points[i].x > max_x) max_x = armor_key_points[i].x;
-      if (armor_key_points[i].y < min_y) min_y = armor_key_points[i].y;
-      if (armor_key_points[i].y > max_y) max_y = armor_key_points[i].y;
+    for (size_t i = 1; i < armor_key_points.size(); ++i) {
+      const auto & pt = armor_key_points[i];
+      if (pt.x < min_x) min_x = pt.x;
+      if (pt.x > max_x) max_x = pt.x;
+      if (pt.y < min_y) min_y = pt.y;
+      if (pt.y > max_y) max_y = pt.y;
     }
 
     cv::Rect rect(min_x, min_y, max_x - min_x, max_y - min_y);
 
-    color_ids.emplace_back(_color_id);
-    num_ids.emplace_back(_class_id);
+    color_ids.emplace_back(color_id);
+    num_ids.emplace_back(class_id);
     boxes.emplace_back(rect);
     confidences.emplace_back(score);
-    armors_key_points.emplace_back(armor_key_points);
+    armors_key_points.emplace_back(std::move(armor_key_points));
   }
 
   std::vector<int> indices;
@@ -271,7 +382,7 @@ void YOLOV5_RKNN::draw_detections(
     cv::rectangle(detection, roi_, green, 2);
   }
   cv::resize(detection, detection, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
-  cv::imshow("detection", detection);
+  //cv::imshow("detection", detection);
 }
 
 void YOLOV5_RKNN::save(const Armor & armor) const
@@ -303,36 +414,169 @@ bool YOLOV5_RKNN::init_rknn(const std::string & model_path)
     return false;
   }
 
-  int ret = rknn_init(&ctx_, model_data.data(), model_data.size(), 0, nullptr);
-  if (ret != RKNN_SUCC) {
-    tools::logger()->error("rknn_init failed, ret={}", ret);
-    ctx_ = 0;
-    return false;
-  }
+  const auto cleanup = [this]() {
+    for (auto & ctx_item : ctxs_) {
+      if (ctx_item.ctx != 0) {
+        rknn_destroy(ctx_item.ctx);
+        ctx_item.ctx = 0;
+      }
+      ctx_item.input_attrs.clear();
+      ctx_item.output_attrs.clear();
+      ctx_item.io_num = {};
+    }
+  };
 
-  ret = rknn_query(ctx_, RKNN_QUERY_IN_OUT_NUM, &io_num_, sizeof(io_num_));
-  if (ret != RKNN_SUCC) {
-    tools::logger()->error("rknn_query IN_OUT_NUM failed, ret={}", ret);
-    return false;
-  }
+  const std::array<rknn_core_mask, kRknnContextCount> masks = {
+    RKNN_NPU_CORE_0,
+    RKNN_NPU_CORE_1,
+    RKNN_NPU_CORE_2,
+  };
 
-  input_attrs_.resize(io_num_.n_input);
-  output_attrs_.resize(io_num_.n_output);
-  for (uint32_t i = 0; i < io_num_.n_input; ++i) {
-    input_attrs_[i].index = i;
-    rknn_query(ctx_, RKNN_QUERY_INPUT_ATTR, &input_attrs_[i], sizeof(rknn_tensor_attr));
-  }
-  for (uint32_t i = 0; i < io_num_.n_output; ++i) {
-    output_attrs_[i].index = i;
-    rknn_query(ctx_, RKNN_QUERY_OUTPUT_ATTR, &output_attrs_[i], sizeof(rknn_tensor_attr));
+  for (size_t i = 0; i < kRknnContextCount; ++i) {
+    auto & ctx_item = ctxs_[i];
+    int ret = rknn_init(&ctx_item.ctx, model_data.data(), model_data.size(), 0, nullptr);
+    if (ret != RKNN_SUCC) {
+      tools::logger()->error("rknn_init failed, ret={}", ret);
+      ctx_item.ctx = 0;
+      cleanup();
+      return false;
+    }
+
+    ret = rknn_set_core_mask(ctx_item.ctx, masks[i]);
+    if (ret != RKNN_SUCC) {
+      tools::logger()->error("rknn_set_core_mask failed, ret={}", ret);
+      cleanup();
+      return false;
+    }
+
+    ret = rknn_query(ctx_item.ctx, RKNN_QUERY_IN_OUT_NUM, &ctx_item.io_num, sizeof(ctx_item.io_num));
+    if (ret != RKNN_SUCC) {
+      tools::logger()->error("rknn_query IN_OUT_NUM failed, ret={}", ret);
+      cleanup();
+      return false;
+    }
+
+    ctx_item.input_attrs.resize(ctx_item.io_num.n_input);
+    ctx_item.output_attrs.resize(ctx_item.io_num.n_output);
+    for (uint32_t j = 0; j < ctx_item.io_num.n_input; ++j) {
+      ctx_item.input_attrs[j].index = j;
+      rknn_query(
+        ctx_item.ctx, RKNN_QUERY_INPUT_ATTR, &ctx_item.input_attrs[j],
+        sizeof(rknn_tensor_attr));
+    }
+    for (uint32_t j = 0; j < ctx_item.io_num.n_output; ++j) {
+      ctx_item.output_attrs[j].index = j;
+      rknn_query(
+        ctx_item.ctx, RKNN_QUERY_OUTPUT_ATTR, &ctx_item.output_attrs[j],
+        sizeof(rknn_tensor_attr));
+    }
   }
 
   return true;
 }
 
-bool YOLOV5_RKNN::infer(const cv::Mat & img_rgb_u8, std::vector<rknn_output> & outputs)
+void YOLOV5_RKNN::start_workers()
 {
-  if (ctx_ == 0) {
+  if (workers_started_) {
+    return;
+  }
+  stop_workers_ = false;
+  for (size_t i = 0; i < kRknnContextCount; ++i) {
+    workers_[i] = std::thread([this, i] { worker_loop(i); });
+  }
+  workers_started_ = true;
+}
+
+void YOLOV5_RKNN::stop_workers()
+{
+  if (!workers_started_) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lk(queue_mu_);
+    stop_workers_ = true;
+  }
+  queue_cv_.notify_all();
+  for (auto & t : workers_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+  workers_started_ = false;
+}
+
+void YOLOV5_RKNN::worker_loop(size_t ctx_index)
+{
+  while (true) {
+    InferJob job;
+    {
+      std::unique_lock<std::mutex> lk(queue_mu_);
+      queue_cv_.wait(lk, [this] { return stop_workers_ || !job_queue_.empty(); });
+      if (stop_workers_ && job_queue_.empty()) {
+        return;
+      }
+      job = std::move(job_queue_.front());
+      job_queue_.pop_front();
+    }
+
+    InferResult result;
+    result.ctx_index = ctx_index;
+
+    std::vector<rknn_output> outputs;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!infer(job.input_rgb, outputs, ctx_index)) {
+      release_outputs(outputs, ctx_index);
+      result.ok = false;
+      result.infer_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0)
+        .count();
+      job.promise.set_value(std::move(result));
+      continue;
+    }
+
+    const auto t1 = std::chrono::steady_clock::now();
+
+    const float *out0 = nullptr;
+    int rows = 0;
+    int cols = 0;
+    if (!ctxs_[ctx_index].output_attrs.empty()) {
+      const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
+      if (out_attr.n_dims >= 3) {
+        rows = static_cast<int>(out_attr.dims[1]);
+        cols = static_cast<int>(out_attr.dims[2]);
+      }
+    }
+    if (rows <= 0 || cols <= 0) {
+      rows = kOutputRowsFallback;
+      cols = kOutputCols;
+    }
+
+    if (!outputs.empty()) {
+      out0 = reinterpret_cast<const float *>(outputs[0].buf);
+    }
+
+    if (out0) {
+      result.ok = true;
+      result.rows = rows;
+      result.cols = cols;
+      result.output.assign(out0, out0 + static_cast<size_t>(rows) * static_cast<size_t>(cols));
+    } else {
+      result.ok = false;
+    }
+
+    release_outputs(outputs, ctx_index);
+
+    result.infer_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+    job.promise.set_value(std::move(result));
+  }
+}
+
+bool YOLOV5_RKNN::infer(
+  const cv::Mat & img_rgb_u8, std::vector<rknn_output> & outputs, size_t ctx_index)
+{
+  if (ctx_index >= kRknnContextCount || ctxs_[ctx_index].ctx == 0) {
     tools::logger()->error("RKNN context is null");
     return false;
   }
@@ -340,6 +584,8 @@ bool YOLOV5_RKNN::infer(const cv::Mat & img_rgb_u8, std::vector<rknn_output> & o
     tools::logger()->error("Expect RGB uint8 HWC CV_8UC3 input");
     return false;
   }
+
+  auto & ctx_item = ctxs_[ctx_index];
 
   rknn_input in;
   std::memset(&in, 0, sizeof(in));
@@ -349,24 +595,24 @@ bool YOLOV5_RKNN::infer(const cv::Mat & img_rgb_u8, std::vector<rknn_output> & o
   in.size = static_cast<uint32_t>(img_rgb_u8.total() * img_rgb_u8.elemSize());
   in.buf = const_cast<unsigned char *>(img_rgb_u8.ptr<unsigned char>());
 
-  int ret = rknn_inputs_set(ctx_, io_num_.n_input, &in);
+  int ret = rknn_inputs_set(ctx_item.ctx, ctx_item.io_num.n_input, &in);
   if (ret != RKNN_SUCC) {
     tools::logger()->error("rknn_inputs_set failed, ret={}", ret);
     return false;
   }
 
-  ret = rknn_run(ctx_, nullptr);
+  ret = rknn_run(ctx_item.ctx, nullptr);
   if (ret != RKNN_SUCC) {
     tools::logger()->error("rknn_run failed, ret={}", ret);
     return false;
   }
 
-  outputs.assign(io_num_.n_output, {});
-  for (uint32_t i = 0; i < io_num_.n_output; ++i) {
+  outputs.assign(ctx_item.io_num.n_output, {});
+  for (uint32_t i = 0; i < ctx_item.io_num.n_output; ++i) {
     outputs[i].want_float = 1;
   }
 
-  ret = rknn_outputs_get(ctx_, io_num_.n_output, outputs.data(), nullptr);
+  ret = rknn_outputs_get(ctx_item.ctx, ctx_item.io_num.n_output, outputs.data(), nullptr);
   if (ret != RKNN_SUCC) {
     tools::logger()->error("rknn_outputs_get failed, ret={}", ret);
     outputs.clear();
@@ -376,12 +622,12 @@ bool YOLOV5_RKNN::infer(const cv::Mat & img_rgb_u8, std::vector<rknn_output> & o
   return true;
 }
 
-void YOLOV5_RKNN::release_outputs(std::vector<rknn_output> & outputs)
+void YOLOV5_RKNN::release_outputs(std::vector<rknn_output> & outputs, size_t ctx_index)
 {
-  if (ctx_ == 0 || outputs.empty()) {
+  if (ctx_index >= kRknnContextCount || ctxs_[ctx_index].ctx == 0 || outputs.empty()) {
     return;
   }
-  rknn_outputs_release(ctx_, outputs.size(), outputs.data());
+  rknn_outputs_release(ctxs_[ctx_index].ctx, outputs.size(), outputs.data());
   outputs.clear();
 }
 

@@ -46,7 +46,7 @@ int main(int argc, char * argv[])
     std::this_thread::sleep_for(10ms);
 
     if (!display) continue;
-    cv::imshow("img", img);
+    //cv::imshow("img", img);
     if (cv::waitKey(1) == 'q') break;
   }
 }
