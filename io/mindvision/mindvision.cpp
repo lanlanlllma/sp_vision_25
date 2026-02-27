@@ -76,12 +76,14 @@ void MindVision::open()
   width_ = camera_capbility.sResolutionRange.iWidthMax;
   height_ = camera_capbility.sResolutionRange.iHeightMax;
 
+  log_frame_speed_list(camera_capbility);
+
   CameraSetAeState(handle_, FALSE);                        // 关闭自动曝光
   CameraSetExposureTime(handle_, exposure_ms_ * 1e3);      // 设置曝光
   CameraSetGamma(handle_, gamma_ * 1e2);                   // 设置伽马
   CameraSetIspOutFormat(handle_, CAMERA_MEDIA_TYPE_BGR8);  // 设置输出格式为BGR
   CameraSetTriggerMode(handle_, 0);                        // 设置为连续采集模式
-  CameraSetFrameSpeed(handle_, 1);                         // 设置为低帧率模式
+  CameraSetFrameSpeed(handle_, 0);                         // 设置为低帧率模式
 
   CameraPlay(handle_);
 
@@ -166,6 +168,20 @@ void MindVision::reset_usb() const
     tools::logger()->info("Reset usb successfully :)");
 
   libusb_close(handle);
+}
+
+void MindVision::log_frame_speed_list(const tSdkCameraCapbility & capability) const
+{
+  if (capability.iFrameSpeedDesc <= 0 || !capability.pFrameSpeedDesc) {
+    tools::logger()->warn("No frame speed list available from camera capability.");
+    return;
+  }
+
+  tools::logger()->info("Available frame speed modes (count={}):", capability.iFrameSpeedDesc);
+  for (int i = 0; i < capability.iFrameSpeedDesc; ++i) {
+    const auto & desc = capability.pFrameSpeedDesc[i];
+    tools::logger()->info("  [{}] {}", desc.iIndex, desc.acDescription);
+  }
 }
 
 }  // namespace io

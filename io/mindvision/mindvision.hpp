@@ -39,6 +39,7 @@ private:
   void close();
   void set_vid_pid(const std::string & vid_pid);
   void reset_usb() const;
+  void log_frame_speed_list(const tSdkCameraCapbility & capability) const;
 };
 
 }  // namespace io
