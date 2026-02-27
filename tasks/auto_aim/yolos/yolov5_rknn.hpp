@@ -8,10 +8,12 @@
 #include <future>
 #include <list>
 #include <mutex>
+#include <cstdint>
 #include <opencv2/opencv.hpp>
 #include <rknn_api.h>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "tasks/auto_aim/armor.hpp"
@@ -23,10 +25,17 @@ namespace auto_aim
 class YOLOV5_RKNN : public YOLOBase
 {
 public:
+  using JobId = uint64_t;
+  static constexpr JobId kInvalidJobId = 0;
+
   YOLOV5_RKNN(const std::string & config_path, bool debug);
   ~YOLOV5_RKNN();
 
   std::list<Armor> detect(const cv::Mat & bgr_img, int frame_count) override;
+
+  JobId submit(const cv::Mat & bgr_img, int frame_count);
+  std::list<Armor> wait(JobId job_id);
+  bool try_wait(JobId job_id, std::list<Armor> & armors);
 
   std::list<Armor> postprocess(
     double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count) override;
@@ -56,6 +65,17 @@ private:
     std::promise<InferResult> promise;
   };
 
+  struct PendingJob
+  {
+    double scale = 1.0;
+    cv::Mat raw_img;
+    int frame_count = -1;
+    std::future<InferResult> future;
+    std::chrono::steady_clock::time_point t_begin;
+    std::chrono::steady_clock::time_point t_pre_end;
+    std::chrono::steady_clock::time_point t_submit;
+  };
+
   static constexpr size_t kRknnContextCount = 3;
 
   std::string model_path_;
@@ -69,7 +89,6 @@ private:
 
   cv::Rect roi_;
   cv::Point2f offset_;
-  cv::Mat tmp_img_;
 
   Detector detector_;
   friend class MultiThreadDetector;
@@ -84,6 +103,12 @@ private:
   bool stop_workers_ = false;
   bool workers_started_ = false;
 
+  std::mutex pending_mu_;
+  std::unordered_map<JobId, PendingJob> pending_jobs_;
+  std::atomic<JobId> next_job_id_{1};
+
+  std::mutex postprocess_mu_;
+
   bool check_name(const Armor & armor) const;
   bool check_type(const Armor & armor) const;
 
@@ -91,9 +116,12 @@ private:
 
   std::list<Armor> parse(double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count);
 
-  void save(const Armor & armor) const;
+  void save(const Armor & armor, const cv::Mat & img) const;
   void draw_detections(const cv::Mat & img, const std::list<Armor> & armors, int frame_count) const;
   double sigmoid(double x);
+
+  bool preprocess(const cv::Mat & raw_img, cv::Mat & input_rgb, double & scale) const;
+  std::future<InferResult> enqueue_infer(const cv::Mat & input_rgb);
 
   bool init_rknn(const std::string & model_path);
   void start_workers();

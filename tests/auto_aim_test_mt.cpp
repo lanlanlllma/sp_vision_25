@@ -54,12 +54,8 @@ int main(int argc, char * argv[])
   cv::VideoCapture video(video_path);
   std::ifstream text(text_path);
 
-  const int num_yolo_thread = 3;
-  std::vector<auto_aim::YOLO> yolos;
-  yolos.reserve(num_yolo_thread);
-  for (int i = 0; i < num_yolo_thread; ++i) {
-    yolos.emplace_back(config_path);
-  }
+  const int max_inflight = 3;
+  auto_aim::YOLO yolo(config_path);
   auto_aim::Solver solver(config_path);
   auto tracker = std::make_unique<auto_aim::Tracker>(config_path, solver);
   auto_aim::Aimer aimer(config_path);
@@ -77,13 +73,12 @@ int main(int argc, char * argv[])
     text >> t >> w >> x >> y >> z;
   }
 
-  tools::ThreadPool thread_pool(num_yolo_thread);
-  std::queue<int> yolo_free;
-  std::mutex yolo_mu;
-  std::condition_variable yolo_cv;
-  for (int i = 0; i < num_yolo_thread; ++i) {
-    yolo_free.push(i);
-  }
+  struct PendingFrame
+  {
+    auto_aim::YOLO::JobId job_id = auto_aim::YOLO::kInvalidJobId;
+    tools::Frame frame;
+  };
+  std::deque<PendingFrame> pending;
 
   std::atomic<bool> stop_requested{false};
   std::atomic<bool> done_reading{false};
@@ -322,27 +317,25 @@ int main(int argc, char * argv[])
     frame.t = timestamp;
     frame.q = Eigen::Quaterniond(w, x, y, z);
 
-    thread_pool.enqueue([&, frame = std::move(frame)]() mutable {
-      int yolo_id = -1;
-      {
-        std::unique_lock<std::mutex> lk(yolo_mu);
-        yolo_cv.wait(lk, [&] {
-          return !yolo_free.empty() || exiter.exit() || stop_requested.load();
-        });
-        if (exiter.exit() || stop_requested.load()) return;
-        yolo_id = yolo_free.front();
-        yolo_free.pop();
-      }
+    const auto job_id = yolo.submit(frame.img, frame.id);
+    if (job_id == auto_aim::YOLO::kInvalidJobId) {
+      continue;
+    }
+    pending.push_back(PendingFrame{job_id, std::move(frame)});
 
-      frame.armors = yolos[yolo_id].detect(frame.img, frame.id);
-      frame_queue.push(frame);
+    if (pending.size() >= static_cast<size_t>(max_inflight)) {
+      auto pending_frame = std::move(pending.front());
+      pending.pop_front();
+      pending_frame.frame.armors = yolo.wait(pending_frame.job_id);
+      frame_queue.push(std::move(pending_frame.frame));
+    }
+  }
 
-      {
-        std::lock_guard<std::mutex> lk(yolo_mu);
-        yolo_free.push(yolo_id);
-      }
-      yolo_cv.notify_one();
-    });
+  while (!pending.empty()) {
+    auto pending_frame = std::move(pending.front());
+    pending.pop_front();
+    pending_frame.frame.armors = yolo.wait(pending_frame.job_id);
+    frame_queue.push(std::move(pending_frame.frame));
   }
 
   done_reading = true;

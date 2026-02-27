@@ -69,6 +69,10 @@ YOLOV5_RKNN::YOLOV5_RKNN(const std::string & config_path, bool debug)
 YOLOV5_RKNN::~YOLOV5_RKNN()
 {
   stop_workers();
+  {
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    pending_jobs_.clear();
+  }
   for (auto & ctx_item : ctxs_) {
     if (ctx_item.ctx != 0) {
       rknn_destroy(ctx_item.ctx);
@@ -86,88 +90,18 @@ std::list<Armor> YOLOV5_RKNN::detect(const cv::Mat & raw_img, int frame_count)
 
   const auto t_begin = std::chrono::steady_clock::now();
 
-  cv::Mat bgr_img;
-  if (use_roi_) {
-    if (roi_.width == -1) {  // -1 表示该维度不裁切
-      roi_.width = raw_img.cols;
-    }
-    if (roi_.height == -1) {  // -1 表示该维度不裁切
-      roi_.height = raw_img.rows;
-    }
-    bgr_img = raw_img(roi_);
-  } else {
-    bgr_img = raw_img;
-  }
-
-  auto x_scale = static_cast<double>(kInputSize) / bgr_img.rows;
-  auto y_scale = static_cast<double>(kInputSize) / bgr_img.cols;
-  auto scale = std::min(x_scale, y_scale);
-  auto h = static_cast<int>(bgr_img.rows * scale);
-  auto w = static_cast<int>(bgr_img.cols * scale);
-
-  // preprocess (letterbox)
-  auto input = cv::Mat(kInputSize, kInputSize, CV_8UC3, cv::Scalar(0, 0, 0));
-  auto roi = cv::Rect(0, 0, w, h);
-  cv::resize(bgr_img, input(roi), {w, h});
-
   cv::Mat input_rgb;
-  cv::cvtColor(input, input_rgb, cv::COLOR_BGR2RGB);
+  double scale = 1.0;
+  if (!preprocess(raw_img, input_rgb, scale)) {
+    return std::list<Armor>();
+  }
 
   const auto t_pre_end = std::chrono::steady_clock::now();
 
   const auto t_submit = std::chrono::steady_clock::now();
 
-  InferResult result;
-  if (workers_started_) {
-    InferJob job;
-    job.input_rgb = input_rgb;
-    auto fut = job.promise.get_future();
-    {
-      std::lock_guard<std::mutex> lk(queue_mu_);
-      job_queue_.push_back(std::move(job));
-    }
-    queue_cv_.notify_one();
-    result = fut.get();
-  } else {
-    const size_t ctx_index =
-      static_cast<size_t>(next_ctx_.fetch_add(1, std::memory_order_relaxed) % kRknnContextCount);
-    std::vector<rknn_output> outputs;
-    if (!infer(input_rgb, outputs, ctx_index)) {
-      release_outputs(outputs, ctx_index);
-      return std::list<Armor>();
-    }
-
-    const float *out0 = nullptr;
-    int rows = 0;
-    int cols = 0;
-    if (!ctxs_[ctx_index].output_attrs.empty()) {
-      const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
-      if (out_attr.n_dims >= 3) {
-        rows = static_cast<int>(out_attr.dims[1]);
-        cols = static_cast<int>(out_attr.dims[2]);
-      }
-    }
-    if (rows <= 0 || cols <= 0) {
-      rows = kOutputRowsFallback;
-      cols = kOutputCols;
-    }
-
-    if (!outputs.empty()) {
-      out0 = reinterpret_cast<const float *>(outputs[0].buf);
-    }
-    if (!out0) {
-      tools::logger()->error("RKNN output buffer is null");
-      release_outputs(outputs, ctx_index);
-      return std::list<Armor>();
-    }
-
-    result.ok = true;
-    result.ctx_index = ctx_index;
-    result.rows = rows;
-    result.cols = cols;
-    result.output.assign(out0, out0 + static_cast<size_t>(rows) * static_cast<size_t>(cols));
-    release_outputs(outputs, ctx_index);
-  }
+  auto fut = enqueue_infer(input_rgb);
+  InferResult result = fut.get();
 
   const auto t_infer_end = std::chrono::steady_clock::now();
 
@@ -177,7 +111,11 @@ std::list<Armor> YOLOV5_RKNN::detect(const cv::Mat & raw_img, int frame_count)
   }
 
   cv::Mat output(result.rows, result.cols, CV_32F, result.output.data());
-  auto armors = parse(scale, output, raw_img, frame_count);
+  std::list<Armor> armors;
+  {
+    std::lock_guard<std::mutex> lk(postprocess_mu_);
+    armors = parse(scale, output, raw_img, frame_count);
+  }
 
   const auto t_post_end = std::chrono::steady_clock::now();
 
@@ -198,6 +136,143 @@ std::list<Armor> YOLOV5_RKNN::detect(const cv::Mat & raw_img, int frame_count)
       result.rows, result.cols);
   }
   return armors;
+}
+
+YOLOV5_RKNN::JobId YOLOV5_RKNN::submit(const cv::Mat & raw_img, int frame_count)
+{
+  if (raw_img.empty()) {
+    tools::logger()->warn("Empty img!, camera drop!");
+    return kInvalidJobId;
+  }
+
+  const auto t_begin = std::chrono::steady_clock::now();
+
+  cv::Mat input_rgb;
+  double scale = 1.0;
+  if (!preprocess(raw_img, input_rgb, scale)) {
+    return kInvalidJobId;
+  }
+
+  const auto t_pre_end = std::chrono::steady_clock::now();
+
+  auto fut = enqueue_infer(input_rgb);
+
+  const auto t_submit = std::chrono::steady_clock::now();
+
+  PendingJob pending;
+  pending.scale = scale;
+  pending.raw_img = raw_img.clone();
+  pending.frame_count = frame_count;
+  pending.future = std::move(fut);
+  pending.t_begin = t_begin;
+  pending.t_pre_end = t_pre_end;
+  pending.t_submit = t_submit;
+
+  const JobId job_id = next_job_id_.fetch_add(1, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    pending_jobs_.emplace(job_id, std::move(pending));
+  }
+
+  return job_id;
+}
+
+std::list<Armor> YOLOV5_RKNN::wait(JobId job_id)
+{
+  PendingJob pending;
+  {
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    auto it = pending_jobs_.find(job_id);
+    if (it == pending_jobs_.end()) {
+      tools::logger()->warn("Invalid job id: {}", job_id);
+      return std::list<Armor>();
+    }
+    pending = std::move(it->second);
+    pending_jobs_.erase(it);
+  }
+
+  InferResult result = pending.future.get();
+  const auto t_infer_end = std::chrono::steady_clock::now();
+  if (!result.ok || result.output.empty() || result.rows <= 0 || result.cols <= 0) {
+    tools::logger()->error("RKNN output is empty");
+    return std::list<Armor>();
+  }
+
+  cv::Mat output(result.rows, result.cols, CV_32F, result.output.data());
+  std::list<Armor> armors;
+  {
+    std::lock_guard<std::mutex> lk(postprocess_mu_);
+    armors = parse(pending.scale, output, pending.raw_img, pending.frame_count);
+  }
+  const auto t_post_end = std::chrono::steady_clock::now();
+
+  if (debug_) {
+    const auto pre_ms =
+      std::chrono::duration<double, std::milli>(pending.t_pre_end - pending.t_begin).count();
+    const auto wait_ms =
+      std::chrono::duration<double, std::milli>(t_infer_end - pending.t_submit).count();
+    const auto infer_ms = result.infer_us / 1000.0;
+    const auto post_ms =
+      std::chrono::duration<double, std::milli>(t_post_end - t_infer_end).count();
+    const auto total_ms =
+      std::chrono::duration<double, std::milli>(t_post_end - pending.t_begin).count();
+
+    tools::logger()->debug(
+      "[YOLOV5_RKNN] frame={} ctx={} pre={:.3f}ms wait={:.3f}ms infer={:.3f}ms post={:.3f}ms total={:.3f}ms rows={} cols={}",
+      pending.frame_count, result.ctx_index, pre_ms, wait_ms, infer_ms, post_ms, total_ms,
+      result.rows, result.cols);
+  }
+  return armors;
+}
+
+bool YOLOV5_RKNN::try_wait(JobId job_id, std::list<Armor> & armors)
+{
+  PendingJob pending;
+  {
+    std::lock_guard<std::mutex> lk(pending_mu_);
+    auto it = pending_jobs_.find(job_id);
+    if (it == pending_jobs_.end()) {
+      return false;
+    }
+    if (it->second.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+      return false;
+    }
+    pending = std::move(it->second);
+    pending_jobs_.erase(it);
+  }
+
+  InferResult result = pending.future.get();
+  const auto t_infer_end = std::chrono::steady_clock::now();
+  if (!result.ok || result.output.empty() || result.rows <= 0 || result.cols <= 0) {
+    tools::logger()->error("RKNN output is empty");
+    armors.clear();
+    return true;
+  }
+
+  cv::Mat output(result.rows, result.cols, CV_32F, result.output.data());
+  {
+    std::lock_guard<std::mutex> lk(postprocess_mu_);
+    armors = parse(pending.scale, output, pending.raw_img, pending.frame_count);
+  }
+
+  const auto t_post_end = std::chrono::steady_clock::now();
+  if (debug_) {
+    const auto pre_ms =
+      std::chrono::duration<double, std::milli>(pending.t_pre_end - pending.t_begin).count();
+    const auto wait_ms =
+      std::chrono::duration<double, std::milli>(t_infer_end - pending.t_submit).count();
+    const auto infer_ms = result.infer_us / 1000.0;
+    const auto post_ms =
+      std::chrono::duration<double, std::milli>(t_post_end - t_infer_end).count();
+    const auto total_ms =
+      std::chrono::duration<double, std::milli>(t_post_end - pending.t_begin).count();
+
+    tools::logger()->debug(
+      "[YOLOV5_RKNN] frame={} ctx={} pre={:.3f}ms wait={:.3f}ms infer={:.3f}ms post={:.3f}ms total={:.3f}ms rows={} cols={}",
+      pending.frame_count, result.ctx_index, pre_ms, wait_ms, infer_ms, post_ms, total_ms,
+      result.rows, result.cols);
+  }
+  return true;
 }
 
 std::list<Armor> YOLOV5_RKNN::parse(
@@ -310,7 +385,6 @@ std::list<Armor> YOLOV5_RKNN::parse(
     }
   }
 
-  tmp_img_ = bgr_img;
   for (auto it = armors.begin(); it != armors.end();) {
     if (!check_name(*it)) {
       it = armors.erase(it);
@@ -385,11 +459,11 @@ void YOLOV5_RKNN::draw_detections(
   //cv::imshow("detection", detection);
 }
 
-void YOLOV5_RKNN::save(const Armor & armor) const
+void YOLOV5_RKNN::save(const Armor & armor, const cv::Mat & img) const
 {
   auto file_name = fmt::format("{:%Y-%m-%d_%H-%M-%S}", std::chrono::system_clock::now());
   auto img_path = fmt::format("{}/{}_{}.jpg", save_path_, armor.name, file_name);
-  cv::imwrite(img_path, tmp_img_);
+  cv::imwrite(img_path, img);
 }
 
 double YOLOV5_RKNN::sigmoid(double x)
@@ -571,6 +645,126 @@ void YOLOV5_RKNN::worker_loop(size_t ctx_index)
 
     job.promise.set_value(std::move(result));
   }
+}
+
+bool YOLOV5_RKNN::preprocess(
+  const cv::Mat & raw_img, cv::Mat & input_rgb, double & scale) const
+{
+  if (raw_img.empty()) {
+    tools::logger()->warn("Empty img!, camera drop!");
+    return false;
+  }
+
+  cv::Mat bgr_img;
+  if (use_roi_) {
+    cv::Rect roi = roi_;
+    if (roi.width == -1) {  // -1 表示该维度不裁切
+      roi.width = raw_img.cols;
+    }
+    if (roi.height == -1) {  // -1 表示该维度不裁切
+      roi.height = raw_img.rows;
+    }
+    if (roi.width <= 0 || roi.height <= 0) {
+      tools::logger()->error("Invalid ROI size: {}x{}", roi.width, roi.height);
+      return false;
+    }
+    bgr_img = raw_img(roi);
+  } else {
+    bgr_img = raw_img;
+  }
+
+  if (bgr_img.empty() || bgr_img.rows <= 0 || bgr_img.cols <= 0) {
+    tools::logger()->error("Empty ROI image");
+    return false;
+  }
+
+  auto x_scale = static_cast<double>(kInputSize) / bgr_img.rows;
+  auto y_scale = static_cast<double>(kInputSize) / bgr_img.cols;
+  scale = std::min(x_scale, y_scale);
+  auto h = static_cast<int>(bgr_img.rows * scale);
+  auto w = static_cast<int>(bgr_img.cols * scale);
+  h = std::max(h, 1);
+  w = std::max(w, 1);
+
+  // preprocess (letterbox)
+  auto input = cv::Mat(kInputSize, kInputSize, CV_8UC3, cv::Scalar(0, 0, 0));
+  auto roi = cv::Rect(0, 0, w, h);
+  cv::resize(bgr_img, input(roi), {w, h});
+
+  cv::cvtColor(input, input_rgb, cv::COLOR_BGR2RGB);
+  return true;
+}
+
+std::future<YOLOV5_RKNN::InferResult> YOLOV5_RKNN::enqueue_infer(
+  const cv::Mat & input_rgb)
+{
+  InferJob job;
+  job.input_rgb = input_rgb;
+  auto fut = job.promise.get_future();
+
+  if (workers_started_) {
+    {
+      std::lock_guard<std::mutex> lk(queue_mu_);
+      job_queue_.push_back(std::move(job));
+    }
+    queue_cv_.notify_one();
+    return fut;
+  }
+
+  InferResult result;
+  const auto t0 = std::chrono::steady_clock::now();
+  const size_t ctx_index =
+    static_cast<size_t>(next_ctx_.fetch_add(1, std::memory_order_relaxed) % kRknnContextCount);
+  result.ctx_index = ctx_index;
+
+  std::vector<rknn_output> outputs;
+  if (!infer(input_rgb, outputs, ctx_index)) {
+    release_outputs(outputs, ctx_index);
+    result.ok = false;
+    result.infer_us = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - t0)
+      .count();
+    job.promise.set_value(std::move(result));
+    return fut;
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+
+  const float *out0 = nullptr;
+  int rows = 0;
+  int cols = 0;
+  if (!ctxs_[ctx_index].output_attrs.empty()) {
+    const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
+    if (out_attr.n_dims >= 3) {
+      rows = static_cast<int>(out_attr.dims[1]);
+      cols = static_cast<int>(out_attr.dims[2]);
+    }
+  }
+  if (rows <= 0 || cols <= 0) {
+    rows = kOutputRowsFallback;
+    cols = kOutputCols;
+  }
+
+  if (!outputs.empty()) {
+    out0 = reinterpret_cast<const float *>(outputs[0].buf);
+  }
+
+  if (out0) {
+    result.ok = true;
+    result.rows = rows;
+    result.cols = cols;
+    result.output.assign(out0, out0 + static_cast<size_t>(rows) * static_cast<size_t>(cols));
+  } else {
+    result.ok = false;
+  }
+
+  release_outputs(outputs, ctx_index);
+
+  result.infer_us =
+    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+  job.promise.set_value(std::move(result));
+  return fut;
 }
 
 bool YOLOV5_RKNN::infer(

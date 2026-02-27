@@ -1,5 +1,6 @@
 #include "yolo.hpp"
 
+#include <stdexcept>
 #include <yaml-cpp/yaml.h>
 
 #include "yolos/yolo11.hpp"
@@ -44,6 +45,33 @@ std::list<Armor> YOLO::postprocess(
   double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count)
 {
   return yolo_->postprocess(scale, output, bgr_img, frame_count);
+}
+
+YOLO::JobId YOLO::submit(const cv::Mat & img, int frame_count)
+{
+  auto * rknn = dynamic_cast<YOLOV5_RKNN *>(yolo_.get());
+  if (!rknn) {
+    throw std::runtime_error("YOLO::submit is only supported by yolov5_rknn");
+  }
+  return rknn->submit(img, frame_count);
+}
+
+std::list<Armor> YOLO::wait(JobId job_id)
+{
+  auto * rknn = dynamic_cast<YOLOV5_RKNN *>(yolo_.get());
+  if (!rknn) {
+    throw std::runtime_error("YOLO::wait is only supported by yolov5_rknn");
+  }
+  return rknn->wait(job_id);
+}
+
+bool YOLO::try_wait(JobId job_id, std::list<Armor> & armors)
+{
+  auto * rknn = dynamic_cast<YOLOV5_RKNN *>(yolo_.get());
+  if (!rknn) {
+    throw std::runtime_error("YOLO::try_wait is only supported by yolov5_rknn");
+  }
+  return rknn->try_wait(job_id, armors);
 }
 
 }  // namespace auto_aim
