@@ -44,9 +44,9 @@ int main(int argc, char * argv[])
     tools::logger()->info("{:.2f} fps", 1 / dt);
 
     if (!display) continue;
-    cv::imshow("img1", img1);
-    cv::imshow("img2", img2);
-    cv::imshow("img3", img3);
+    //cv::imshow("img1", img1);
+    //cv::imshow("img2", img2);
+    //cv::imshow("img3", img3);
 
     if (cv::waitKey(1) == 'q') break;
   }

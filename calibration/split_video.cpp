@@ -76,7 +76,7 @@ int main(int argc, char * argv[])
     outtext << line << std::endl;
 
     cv::resize(img, img, cv::Size(img.size().width * 0.8, img.size().height * 0.8));
-    cv::imshow("result", img);
+    //cv::imshow("result", img);
 
     int key = cv::waitKey(1);
     if (key == 'q') break;

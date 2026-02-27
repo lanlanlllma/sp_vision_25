@@ -155,7 +155,7 @@ int main(int argc, char * argv[])
     plotter.plot(data);
 
     cv::resize(img, img, {}, 0.5, 0.5);
-    cv::imshow("result", img);
+    //cv::imshow("result", img);
 
     auto key = cv::waitKey(1);
     if (key == 'q') break;

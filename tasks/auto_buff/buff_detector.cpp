@@ -11,17 +11,17 @@ void Buff_Detector::handle_img(const cv::Mat & bgr_img, cv::Mat & dilated_img)
   // 彩色图转灰度图
   cv::Mat gray_img;
   cv::cvtColor(bgr_img, gray_img, cv::COLOR_BGR2GRAY);  // 彩色图转灰度图
-  // cv::imshow("gray", gray_img);  // 调试用
+  // //cv::imshow("gray", gray_img);  // 调试用
 
   // 进行二值化           :把高于100变成255，低于100变成0
   cv::Mat binary_img;
   cv::threshold(gray_img, binary_img, 100, 255, cv::THRESH_BINARY);
-  // cv::imshow("binary", binary_img);  // 调试用
+  // //cv::imshow("binary", binary_img);  // 调试用
 
   // 膨胀
   cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));  // 使用矩形核
   cv::dilate(binary_img, dilated_img, kernel, cv::Point(-1, -1), 1);
-  // cv::imshow("Dilated Image", dilated_img);  // 调试用
+  // //cv::imshow("Dilated Image", dilated_img);  // 调试用
 }
 
 cv::Point2f Buff_Detector::get_r_center(std::vector<FanBlade> & fanblades, cv::Mat & bgr_img)
@@ -53,7 +53,7 @@ cv::Point2f Buff_Detector::get_r_center(std::vector<FanBlade> & fanblades, cv::M
   circle(mask, r_center_t, radius, cv::Scalar(255), -1);
   bitwise_and(dilated_img, mask, dilated_img);               // 将遮罩应用于二值化图像
   tools::draw_point(bgr_img, r_center_t, {255, 255, 0}, 5);  // 调试用
-  // cv::imshow("Dilated Image", dilated_img);                // 调试用
+  // //cv::imshow("Dilated Image", dilated_img);                // 调试用
 
   /// 获取轮廓点,矩阵框筛选  TODO
 

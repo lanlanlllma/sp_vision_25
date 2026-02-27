@@ -163,7 +163,7 @@ int main(int argc, char * argv[])
 
     plotter.plot(data);
 
-    cv::imshow("result", img);
+    //cv::imshow("result", img);
 
     int key = cv::waitKey(1);
     if (key == 'q') break;
