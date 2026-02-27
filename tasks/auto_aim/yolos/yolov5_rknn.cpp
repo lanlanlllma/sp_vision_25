@@ -19,6 +19,78 @@ constexpr int kInputSize = 640;
 constexpr int kOutputCols = 22;
 constexpr int kOutputRowsFallback = 25200;
 
+// 3-branch decode constants (matching inference_example.py)
+constexpr int kNumAnchors = 3;
+constexpr int kNumChannels = 22;  // per anchor
+constexpr int kNumScales = 3;
+
+// Anchor sizes: [[10,13],[16,30],[33,23], [30,61],[62,45],[59,119], [116,90],[156,198],[373,326]]
+static const float kAnchors[9][2] = {
+  {10.f, 13.f}, {16.f, 30.f}, {33.f, 23.f},
+  {30.f, 61.f}, {62.f, 45.f}, {59.f, 119.f},
+  {116.f, 90.f}, {156.f, 198.f}, {373.f, 326.f},
+};
+static const int kMasks[3][3] = {{0, 1, 2}, {3, 4, 5}, {6, 7, 8}};
+static const int kStrides[3] = {8, 16, 32};
+
+// Decode 3-branch RKNN outputs [1,66,H,W] into flat [25200, 22] vector.
+// Matches inference_example.py lines 519-577 exactly.
+static std::vector<float> decode_3branch(
+  const std::vector<rknn_output> & outputs,
+  const std::vector<rknn_tensor_attr> & output_attrs)
+{
+  // Total decoded rows: 3*(80*80 + 40*40 + 20*20) = 25200
+  std::vector<float> merged;
+  merged.reserve(kOutputRowsFallback * kOutputCols);
+
+  for (int s = 0; s < kNumScales; ++s) {
+    const auto * data = reinterpret_cast<const float *>(outputs[s].buf);
+    // Determine H, W from output attrs
+    int h = 0, w = 0;
+    if (s < static_cast<int>(output_attrs.size()) && output_attrs[s].n_dims >= 4) {
+      h = static_cast<int>(output_attrs[s].dims[2]);
+      w = static_cast<int>(output_attrs[s].dims[3]);
+    } else {
+      // Fallback: 640/stride
+      h = kInputSize / kStrides[s];
+      w = kInputSize / kStrides[s];
+    }
+
+    const float stride = static_cast<float>(kStrides[s]);
+
+    // data layout: [1, 66, H, W] = [1, 3*22, H, W]  (NCHW)
+    // We need to reshape to [3, 22, H, W] then transpose to [3, H, W, 22]
+    // then decode keypoints and flatten to [3*H*W, 22]
+    for (int a = 0; a < kNumAnchors; ++a) {
+      const float anchor_w = kAnchors[kMasks[s][a]][0];
+      const float anchor_h = kAnchors[kMasks[s][a]][1];
+
+      for (int gy = 0; gy < h; ++gy) {
+        for (int gx = 0; gx < w; ++gx) {
+          // Read 22 channels for this anchor at (gy, gx)
+          // In NCHW: channel c is at offset (a*22 + c)*H*W + gy*W + gx
+          float row[22];
+          for (int c = 0; c < kNumChannels; ++c) {
+            row[c] = data[static_cast<size_t>(a * kNumChannels + c) * h * w + gy * w + gx];
+          }
+
+          // Decode keypoints (channels 0-7): kpt = raw * anchor_wh + grid * stride
+          // LINEAR decode, NOT sigmoid (matches Python reference)
+          for (int kp = 0; kp < 4; ++kp) {
+            row[kp * 2]     = row[kp * 2]     * anchor_w + static_cast<float>(gx) * stride;
+            row[kp * 2 + 1] = row[kp * 2 + 1] * anchor_h + static_cast<float>(gy) * stride;
+          }
+
+          // Channels 8-21: pass-through (conf/color/num logits)
+          merged.insert(merged.end(), row, row + kNumChannels);
+        }
+      }
+    }
+  }
+
+  return merged;
+}
+
 inline double SigmoidFast(double x)
 {
   x = std::max(-50.0, std::min(50.0, x));
@@ -278,22 +350,26 @@ bool YOLOV5_RKNN::try_wait(JobId job_id, std::list<Armor> & armors)
 std::list<Armor> YOLOV5_RKNN::parse(
   double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count)
 {
-  // for each row: kpts + conf + color(4) + num(9)
+  // Postprocess matching inference_example.py::postprocess_single_head
+  // Layout per row: [0-7] keypoints, [8] conf logit, [9-12] color scores, [13-21] num scores
   thread_local std::vector<int> color_ids_buf;
   thread_local std::vector<int> num_ids_buf;
   thread_local std::vector<float> confidences_buf;
+  thread_local std::vector<float> score_num_buf;
   thread_local std::vector<cv::Rect> boxes_buf;
   thread_local std::vector<std::vector<cv::Point2f>> armors_key_points_buf;
 
   auto & color_ids = color_ids_buf;
   auto & num_ids = num_ids_buf;
   auto & confidences = confidences_buf;
+  auto & score_nums = score_num_buf;
   auto & boxes = boxes_buf;
   auto & armors_key_points = armors_key_points_buf;
 
   color_ids.clear();
   num_ids.clear();
   confidences.clear();
+  score_nums.clear();
   boxes.clear();
   armors_key_points.clear();
 
@@ -308,6 +384,7 @@ std::list<Armor> YOLOV5_RKNN::parse(
   color_ids.reserve(rows);
   num_ids.reserve(rows);
   confidences.reserve(rows);
+  score_nums.reserve(rows);
   boxes.reserve(rows);
   armors_key_points.reserve(rows);
 
@@ -315,6 +392,8 @@ std::list<Armor> YOLOV5_RKNN::parse(
 
   for (int r = 0; r < rows; ++r) {
     const float *p = output.ptr<float>(r);
+
+    // Step 1: sigmoid(conf) + threshold
     const double conf_logit = static_cast<double>(p[8]);
     if (conf_logit < conf_logit_thresh) {
       continue;
@@ -324,7 +403,7 @@ std::list<Armor> YOLOV5_RKNN::parse(
       continue;
     }
 
-    // color argmax (9..12)
+    // Step 2: color argmax (9..12)
     int color_id = 0;
     float best_color = p[9];
     for (int j = 10; j < 13; ++j) {
@@ -333,7 +412,13 @@ std::list<Armor> YOLOV5_RKNN::parse(
         color_id = j - 9;
       }
     }
-    // num argmax (13..21)
+
+    // Step 3: color filter — drop None(2)/Purple(3) per postprocess_single_head
+    if (color_id == 2 || color_id == 3) {
+      continue;
+    }
+
+    // Step 4: num argmax (13..21)
     int class_id = 0;
     float best_num = p[13];
     for (int j = 14; j < 22; ++j) {
@@ -343,6 +428,12 @@ std::list<Armor> YOLOV5_RKNN::parse(
       }
     }
 
+    // Step 5: score_num threshold (matches Python: keep3 = score_num > conf_thresh)
+    if (best_num <= score_threshold_) {
+      continue;
+    }
+
+    // Step 6: keypoints + bbox
     std::vector<cv::Point2f> armor_key_points;
     armor_key_points.resize(4);
     armor_key_points[0] = cv::Point2f(p[0] * inv_scale, p[1] * inv_scale);
@@ -369,11 +460,13 @@ std::list<Armor> YOLOV5_RKNN::parse(
     num_ids.emplace_back(class_id);
     boxes.emplace_back(rect);
     confidences.emplace_back(score);
+    score_nums.emplace_back(best_num);
     armors_key_points.emplace_back(std::move(armor_key_points));
   }
 
+  // Step 7: NMS using score_num as NMS score (matches Python: nms_xyxy(boxes, score_num, ...))
   std::vector<int> indices;
-  cv::dnn::NMSBoxes(boxes, confidences, score_threshold_, nms_threshold_, indices);
+  cv::dnn::NMSBoxes(boxes, score_nums, score_threshold_, nms_threshold_, indices);
 
   std::list<Armor> armors;
   for (const auto & i : indices) {
@@ -610,30 +703,33 @@ void YOLOV5_RKNN::worker_loop(size_t ctx_index)
 
     const auto t1 = std::chrono::steady_clock::now();
 
-    const float *out0 = nullptr;
-    int rows = 0;
-    int cols = 0;
-    if (!ctxs_[ctx_index].output_attrs.empty()) {
-      const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
-      if (out_attr.n_dims >= 3) {
-        rows = static_cast<int>(out_attr.dims[1]);
-        cols = static_cast<int>(out_attr.dims[2]);
+    // Decode 3-branch outputs into [25200, 22]
+    if (outputs.size() >= kNumScales) {
+      auto decoded = decode_3branch(outputs, ctxs_[ctx_index].output_attrs);
+      const int total = static_cast<int>(decoded.size()) / kOutputCols;
+      result.ok = true;
+      result.rows = total;
+      result.cols = kOutputCols;
+      result.output = std::move(decoded);
+    } else if (!outputs.empty()) {
+      // Fallback for single-head model (legacy path)
+      const float *out0 = reinterpret_cast<const float *>(outputs[0].buf);
+      int rows = 0, cols = 0;
+      if (!ctxs_[ctx_index].output_attrs.empty()) {
+        const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
+        if (out_attr.n_dims >= 3) {
+          rows = static_cast<int>(out_attr.dims[1]);
+          cols = static_cast<int>(out_attr.dims[2]);
+        }
       }
-    }
-    if (rows <= 0 || cols <= 0) {
-      rows = kOutputRowsFallback;
-      cols = kOutputCols;
-    }
-
-    if (!outputs.empty()) {
-      out0 = reinterpret_cast<const float *>(outputs[0].buf);
-    }
-
-    if (out0) {
+      if (rows <= 0 || cols <= 0) {
+        rows = kOutputRowsFallback;
+        cols = kOutputCols;
+      }
       result.ok = true;
       result.rows = rows;
       result.cols = cols;
-      result.output.assign(out0, out0 + static_cast<size_t>(rows) * static_cast<size_t>(cols));
+      result.output.assign(out0, out0 + static_cast<size_t>(rows) * cols);
     } else {
       result.ok = false;
     }
@@ -730,30 +826,33 @@ std::future<YOLOV5_RKNN::InferResult> YOLOV5_RKNN::enqueue_infer(
 
   const auto t1 = std::chrono::steady_clock::now();
 
-  const float *out0 = nullptr;
-  int rows = 0;
-  int cols = 0;
-  if (!ctxs_[ctx_index].output_attrs.empty()) {
-    const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
-    if (out_attr.n_dims >= 3) {
-      rows = static_cast<int>(out_attr.dims[1]);
-      cols = static_cast<int>(out_attr.dims[2]);
+  // Decode 3-branch outputs into [25200, 22]
+  if (outputs.size() >= kNumScales) {
+    auto decoded = decode_3branch(outputs, ctxs_[ctx_index].output_attrs);
+    const int total = static_cast<int>(decoded.size()) / kOutputCols;
+    result.ok = true;
+    result.rows = total;
+    result.cols = kOutputCols;
+    result.output = std::move(decoded);
+  } else if (!outputs.empty()) {
+    // Fallback for single-head model (legacy path)
+    const float *out0 = reinterpret_cast<const float *>(outputs[0].buf);
+    int rows = 0, cols = 0;
+    if (!ctxs_[ctx_index].output_attrs.empty()) {
+      const auto & out_attr = ctxs_[ctx_index].output_attrs.front();
+      if (out_attr.n_dims >= 3) {
+        rows = static_cast<int>(out_attr.dims[1]);
+        cols = static_cast<int>(out_attr.dims[2]);
+      }
     }
-  }
-  if (rows <= 0 || cols <= 0) {
-    rows = kOutputRowsFallback;
-    cols = kOutputCols;
-  }
-
-  if (!outputs.empty()) {
-    out0 = reinterpret_cast<const float *>(outputs[0].buf);
-  }
-
-  if (out0) {
+    if (rows <= 0 || cols <= 0) {
+      rows = kOutputRowsFallback;
+      cols = kOutputCols;
+    }
     result.ok = true;
     result.rows = rows;
     result.cols = cols;
-    result.output.assign(out0, out0 + static_cast<size_t>(rows) * static_cast<size_t>(cols));
+    result.output.assign(out0, out0 + static_cast<size_t>(rows) * cols);
   } else {
     result.ok = false;
   }

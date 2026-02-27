@@ -64,7 +64,7 @@ if(USE_CROSS_COMPILER)
     message(STATUS "RKNN_INCLUDE_DIR=${RKNN_INCLUDE_DIR}")
     message(STATUS "RKNN_LIBRARY=${RKNN_LIBRARY}")
     message("now using crosscompiler")
-        else()
+else()
         set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake/")
 
         set(RKNN_INCLUDE_DIR "" CACHE PATH "Path to directory containing rknn_api.h")

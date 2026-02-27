@@ -106,7 +106,7 @@ private:
   std::mutex pending_mu_;
   std::unordered_map<JobId, PendingJob> pending_jobs_;
   std::atomic<JobId> next_job_id_{1};
-
+  
   std::mutex postprocess_mu_;
 
   bool check_name(const Armor & armor) const;
