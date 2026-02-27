@@ -252,7 +252,7 @@ bool Detector::check_name(const Armor & armor) const
   auto confidence_ok = armor.confidence > min_confidence_;
 
   // 保存不确定的图案，用于分类器的迭代
-  if (name_ok && !confidence_ok) save(armor);
+  // if (name_ok && !confidence_ok) save(armor);
 
   // 出现 5号 则显示 debug 信息。但不过滤。
   if (armor.name == ArmorName::five) tools::logger()->debug("See pattern 5");
