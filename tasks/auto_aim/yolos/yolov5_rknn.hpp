@@ -47,6 +47,13 @@ private:
     rknn_input_output_num io_num{};
     std::vector<rknn_tensor_attr> input_attrs;
     std::vector<rknn_tensor_attr> output_attrs;
+
+    // Zero-copy IO memory
+    bool use_io_mem = false;
+    rknn_tensor_attr io_input_attr{};
+    rknn_tensor_mem * input_mem = nullptr;
+    std::vector<rknn_tensor_attr> io_output_attrs;
+    std::vector<rknn_tensor_mem *> output_mems;
   };
 
   struct InferResult
@@ -118,7 +125,7 @@ private:
 
   void save(const Armor & armor, const cv::Mat & img) const;
   void draw_detections(const cv::Mat & img, const std::list<Armor> & armors, int frame_count) const;
-  double sigmoid(double x);
+  // Removed: unused member `double sigmoid(double x)` — use anonymous-namespace SigmoidFast instead
 
   bool preprocess(const cv::Mat & raw_img, cv::Mat & input_rgb, double & scale) const;
   std::future<InferResult> enqueue_infer(const cv::Mat & input_rgb);
@@ -127,9 +134,14 @@ private:
   void start_workers();
   void stop_workers();
   void worker_loop(size_t ctx_index);
-  bool infer(
-    const cv::Mat & img_rgb_u8, std::vector<rknn_output> & outputs, size_t ctx_index);
-  void release_outputs(std::vector<rknn_output> & outputs, size_t ctx_index);
+  bool infer(const cv::Mat & img_rgb_u8, size_t ctx_index);
+  void release_outputs(size_t ctx_index);
+  bool init_io_mem(RknnContext & ctx_item);
+  void destroy_io_mem(RknnContext & ctx_item);
+  InferResult decode_outputs(size_t ctx_index);
+  void log_timing(
+    int frame_count, size_t ctx_index, double pre_ms, double wait_ms,
+    double infer_ms, double post_ms, double total_ms, int rows, int cols) const;
   static bool read_file(const std::string & path, std::vector<uint8_t> & data);
 };
 

@@ -8,11 +8,10 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "${workspaceFolder}/io/serial/include",
-                "/usr/include/opencv4",
-                "/usr/include/eigen3",
-                "/opt/intel/openvino_2023.3.0/runtime/include/",
-                "/home/rm/sp_msg_25/install/sp_msgs/include/sp_msgs",
-                "/opt/ros/humble/include/**"
+                "/home/ma/sysroot/usr/include/opencv4",
+                "/home/ma/sysroot/usr/include/eigen3",
+                "/home/ma/sysroot/usr/include/",
+                "/home/ma/sysroot/opt/intel/openvino_2024.6.0/runtime/include"
             ],
             "compilerPath": "/usr/bin/gcc",
             "cStandard": "c17",
