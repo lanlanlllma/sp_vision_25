@@ -9,6 +9,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-O3)
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS on)
+add_compile_options(-O3 -mcpu=cortex-a76 -march=armv8.2-a+fp16+dotprod)
 
 message(STATUS "--------------------CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}--------------------")
 

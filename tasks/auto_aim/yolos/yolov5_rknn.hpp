@@ -1,150 +1,92 @@
 #ifndef AUTO_AIM__YOLOV5_RKNN_HPP
 #define AUTO_AIM__YOLOV5_RKNN_HPP
 
-#include <array>
-#include <atomic>
-#include <condition_variable>
 #include <deque>
-#include <future>
 #include <list>
+#include <memory>
 #include <mutex>
-#include <cstdint>
 #include <opencv2/opencv.hpp>
-#include <rknn_api.h>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "tasks/auto_aim/armor.hpp"
 #include "tasks/auto_aim/detector.hpp"
 #include "tasks/auto_aim/yolo.hpp"
+#include "tasks/auto_aim/yolos/rknn_threadpool/include/postprocess.h"
+#include "tasks/auto_aim/yolos/rknn_threadpool/include/rkYolov5s.hpp"
+#include "tasks/auto_aim/yolos/rknn_threadpool/include/rknnPool.hpp"
 
-namespace auto_aim
-{
-class YOLOV5_RKNN : public YOLOBase
-{
+namespace auto_aim {
+
+class YOLOV5_RKNN: public YOLOBase {
 public:
-  using JobId = uint64_t;
-  static constexpr JobId kInvalidJobId = 0;
+    using JobId                          = YOLO::JobId;
+    static constexpr JobId kInvalidJobId = YOLO::kInvalidJobId;
 
-  YOLOV5_RKNN(const std::string & config_path, bool debug);
-  ~YOLOV5_RKNN();
+    YOLOV5_RKNN(const std::string& config_path, bool debug);
 
-  std::list<Armor> detect(const cv::Mat & bgr_img, int frame_count) override;
+    std::list<Armor> detect(const cv::Mat& bgr_img, int frame_count) override;
 
-  JobId submit(const cv::Mat & bgr_img, int frame_count);
-  std::list<Armor> wait(JobId job_id);
-  bool try_wait(JobId job_id, std::list<Armor> & armors);
+    std::list<Armor>
+    postprocess(double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count) override;
 
-  std::list<Armor> postprocess(
-    double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count) override;
+    JobId submit(const cv::Mat& img, int frame_count = -1);
+    std::list<Armor> wait(JobId job_id);
+    bool try_wait(JobId job_id, std::list<Armor>& armors);
 
 private:
-  struct RknnContext
-  {
-    rknn_context ctx = 0;
-    rknn_input_output_num io_num{};
-    std::vector<rknn_tensor_attr> input_attrs;
-    std::vector<rknn_tensor_attr> output_attrs;
+    using Pool = rknnPool<rkYolov5s, cv::Mat, detect_result_group_t>;
 
-    // Zero-copy IO memory
-    bool use_io_mem = false;
-    rknn_tensor_attr io_input_attr{};
-    rknn_tensor_mem * input_mem = nullptr;
-    std::vector<rknn_tensor_attr> io_output_attrs;
-    std::vector<rknn_tensor_mem *> output_mems;
-  };
+    struct PendingJob {
+        JobId job_id = kInvalidJobId;
+        cv::Mat raw_img;
+        int frame_count = -1;
+    };
 
-  struct InferResult
-  {
-    bool ok = false;
-    size_t ctx_index = 0;
-    int rows = 0;
-    int cols = 0;
-    long long infer_us = 0;
-    std::vector<float> output;
-  };
+    std::string model_path_;
+    std::string save_path_;
+    bool debug_           = true;
+    bool use_roi_         = false;
+    bool use_traditional_ = false;
 
-  struct InferJob
-  {
-    cv::Mat input_rgb;
-    std::promise<InferResult> promise;
-  };
+    const float nms_threshold_   = 0.3F;
+    const float score_threshold_ = 0.7F;
+    double min_confidence_       = 0.0;
+    double binary_threshold_     = 0.0;
 
-  struct PendingJob
-  {
-    double scale = 1.0;
-    cv::Mat raw_img;
-    int frame_count = -1;
-    std::future<InferResult> future;
-    std::chrono::steady_clock::time_point t_begin;
-    std::chrono::steady_clock::time_point t_pre_end;
-    std::chrono::steady_clock::time_point t_submit;
-  };
+    cv::Rect roi_;
+    cv::Point2f offset_;
+    cv::Mat tmp_img_;
 
-  static constexpr size_t kRknnContextCount = 3;
+    Detector detector_;
 
-  std::string model_path_;
-  std::string save_path_, debug_path_;
-  bool debug_, use_roi_, use_traditional_;
+    int thread_num_ = 3;
+    std::unique_ptr<Pool> pool_;
 
-  const int class_num_ = 13;
-  const float nms_threshold_ = 0.3F;
-  const float score_threshold_ = 0.7F;
-  double min_confidence_, binary_threshold_;
+    std::mutex state_mtx_;
+    JobId next_job_id_ = 1;
+    std::deque<PendingJob> pending_jobs_;
+    std::unordered_map<JobId, std::list<Armor>> completed_jobs_;
 
-  cv::Rect roi_;
-  cv::Point2f offset_;
+    bool check_name(const Armor& armor) const;
+    bool check_type(const Armor& armor) const;
 
-  Detector detector_;
-  friend class MultiThreadDetector;
+    cv::Point2f get_center_norm(const cv::Mat& bgr_img, const cv::Point2f& center) const;
+    cv::Rect get_active_roi(const cv::Mat& raw_img) const;
 
-  std::array<RknnContext, kRknnContextCount> ctxs_{};
-  std::atomic<uint32_t> next_ctx_{0};
+    std::list<Armor> parse(double scale, cv::Mat& output, const cv::Mat& bgr_img, int frame_count);
+    std::list<Armor>
+    parse(const detect_result_group_t& output, const cv::Mat& bgr_img, int frame_count);
 
-  std::array<std::thread, kRknnContextCount> workers_{};
-  std::mutex queue_mu_;
-  std::condition_variable queue_cv_;
-  std::deque<InferJob> job_queue_;
-  bool stop_workers_ = false;
-  bool workers_started_ = false;
+    bool collect_one(bool blocking);
+    bool take_completed(JobId job_id, std::list<Armor>& armors);
 
-  std::mutex pending_mu_;
-  std::unordered_map<JobId, PendingJob> pending_jobs_;
-  std::atomic<JobId> next_job_id_{1};
-  
-  std::mutex postprocess_mu_;
-
-  bool check_name(const Armor & armor) const;
-  bool check_type(const Armor & armor) const;
-
-  cv::Point2f get_center_norm(const cv::Mat & bgr_img, const cv::Point2f & center) const;
-
-  std::list<Armor> parse(double scale, cv::Mat & output, const cv::Mat & bgr_img, int frame_count);
-
-  void save(const Armor & armor, const cv::Mat & img) const;
-  void draw_detections(const cv::Mat & img, const std::list<Armor> & armors, int frame_count) const;
-  // Removed: unused member `double sigmoid(double x)` — use anonymous-namespace SigmoidFast instead
-
-  bool preprocess(const cv::Mat & raw_img, cv::Mat & input_rgb, double & scale) const;
-  std::future<InferResult> enqueue_infer(const cv::Mat & input_rgb);
-
-  bool init_rknn(const std::string & model_path);
-  void start_workers();
-  void stop_workers();
-  void worker_loop(size_t ctx_index);
-  bool infer(const cv::Mat & img_rgb_u8, size_t ctx_index);
-  void release_outputs(size_t ctx_index);
-  bool init_io_mem(RknnContext & ctx_item);
-  void destroy_io_mem(RknnContext & ctx_item);
-  InferResult decode_outputs(size_t ctx_index);
-  void log_timing(
-    int frame_count, size_t ctx_index, double pre_ms, double wait_ms,
-    double infer_ms, double post_ms, double total_ms, int rows, int cols) const;
-  static bool read_file(const std::string & path, std::vector<uint8_t> & data);
+    void save(const Armor& armor) const;
+    void draw_detections(const cv::Mat& img, const std::list<Armor>& armors, int frame_count) const;
+    double sigmoid(double x);
 };
 
-}  // namespace auto_aim
+} // namespace auto_aim
 
-#endif  // AUTO_AIM__YOLOV5_RKNN_HPP
+#endif // AUTO_AIM__YOLOV5_RKNN_HPP
