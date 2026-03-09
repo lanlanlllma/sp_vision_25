@@ -531,8 +531,21 @@ YOLOV5_RKNN::parse(double scale, cv::Mat& output, const cv::Mat& bgr_img, int fr
         ++it;
     }
 
-    if (debug_)
+    if (debug_) {
+        tools::logger()->debug("[YOLOV5_RKNN] frame={} detected={}", frame_count, armors.size());
+        for (const auto& armor: armors) {
+            tools::logger()->debug(
+                "[YOLOV5_RKNN] conf={:.3f} color={} name={} type={} center=({:.1f},{:.1f})",
+                armor.confidence,
+                COLORS[armor.color],
+                ARMOR_NAMES[armor.name],
+                ARMOR_TYPES[armor.type],
+                armor.center.x,
+                armor.center.y
+            );
+        }
         draw_detections(bgr_img, armors, frame_count);
+    }
 
     return armors;
 }

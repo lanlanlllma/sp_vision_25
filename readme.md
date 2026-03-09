@@ -78,7 +78,7 @@ IMU型号：使用C板内置BMI088作为IMU\
 2. 编译：
     ```bash
     cmake -B build
-    make -C build/ -j`nproc`
+    make -C build/ -j1
     ```
 
 3. 运行demo:
