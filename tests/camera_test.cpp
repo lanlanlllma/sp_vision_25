@@ -30,6 +30,12 @@ int main(int argc, char * argv[])
   auto last_stamp = std::chrono::steady_clock::now();
   while (!exiter.exit()) {
     camera.read(img, timestamp);
+    //save first frame to check
+    static bool first_frame = true;
+    if (first_frame) {
+      cv::imwrite("first_frame.jpg", img);
+      first_frame = false;
+    }
 
     auto dt = tools::delta_time(timestamp, last_stamp);
     last_stamp = timestamp;

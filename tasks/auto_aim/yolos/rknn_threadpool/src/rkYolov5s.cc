@@ -232,13 +232,13 @@ detect_result_group_t rkYolov5s::infer(cv::Mat& orig_img) {
         if (ret != 0) {
             fprintf(stderr, "resize with rga error\n");
         }
-        /*********
-        // opencv
-        float min_scale = std::min(scale_w, scale_h);
-        scale_w = min_scale;
-        scale_h = min_scale;
-        letterbox(img, resized_img, pads, min_scale, target_size);
-        *********/
+        
+        // // opencv
+        // float min_scale = std::min(scale_w, scale_h);
+        // scale_w = min_scale;
+        // scale_h = min_scale;
+        // letterbox(img, resized_img, pads, min_scale, target_size);
+        
         inputs[0].buf = resized_img.data;
     } else {
         inputs[0].buf = img.data;

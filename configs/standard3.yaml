@@ -2,14 +2,16 @@ enemy_color: "red"
 # enemy_color: "blue"
 
 #####-----神经网络参数-----#####
-yolo_name: yolov5
+yolo_name: yolov5_rknn
 classify_model: assets/tiny_resnet.onnx
 yolo11_model_path: assets/yolo11.xml
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
+yolov5_rknn_model_path: assets/b1_True_w8a8_0526_rknn.rknn
+yolov5_rknn_thread_num: 3
 device: CPU
-min_confidence: 0.8
-use_traditional: true
+min_confidence: 0.6
+use_traditional: false
 
 #####-----ROI-----#####
 roi: 
@@ -51,10 +53,9 @@ second_tolerance: 2 # 远距离射击容差，degree
 judge_distance: 2 #距离判断阈值
 auto_fire: true # 是否由自瞄控制射击
 
-camera_name: "mindvision"
-exposure_ms: 2.5
-gamma: 1.0
-gain: 16.9
+camera_name: "hikrobot"
+exposure_ms: 5
+gain: 16
 vid_pid: "2bdf:0001"
 
 #  1  0  0
