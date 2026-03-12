@@ -139,6 +139,8 @@ add_executable(standard src/standard.cpp)
 #add_executable(auto_buff_debug_mpc src/auto_buff_debug_mpc.cpp)
 #add_executable(uav src/uav.cpp)
 #add_executable(uav_debug src/uav_debug.cpp)
+add_executable(uav_mt src/uav_mt.cpp)
+add_executable(uav_rknn_mt src/uav_rknn_mt.cpp)
 
 target_link_libraries(standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 #target_link_libraries(mt_standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
@@ -149,6 +151,8 @@ target_link_libraries(standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_bu
 #target_link_libraries(auto_buff_debug_mpc ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_buff tools io ${CERES_LIBRARIES})
 #target_link_libraries(uav ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 #target_link_libraries(uav_debug ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim tools io)
+target_link_libraries(uav_mt ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
+target_link_libraries(uav_rknn_mt ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
 
 ##################calibration################
 #add_executable(capture calibration/capture.cpp)
