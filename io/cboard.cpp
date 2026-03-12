@@ -2,8 +2,10 @@
 
 #include "Eigen/src/Core/AssignEvaluator.h"
 
+#include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <thread>
 
 namespace io {
 CBoard::CBoard(const std::string& config_path):
@@ -24,16 +26,22 @@ CBoard::CBoard(const std::string& config_path):
     if (!code) {
         tools::logger()->warn("[Cboard] Serial port not opened: {}", static_cast<int>(code.code()));
     }
+    auto now        = std::chrono::steady_clock::now();
+    // Initialize with identity quaternion as fallback values when no IMU data is available yet
+    data_ahead_     = { Eigen::Quaterniond::Identity(), now };
+    data_behind_    = { Eigen::Quaterniond::Identity(), now };
     this->start();
-    queue_.pop(data_ahead_);
-    queue_.pop(data_behind_);
     tools::logger()->info("[Cboard] Opened.");
 }
 
 void CBoard::start() {
     std::thread Link_thread([this] {
         while (true) {
-            this->serial_.read(this->read_buffer_);
+            auto code = this->serial_.read(this->read_buffer_);
+            if (!code) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
             // std::cout << "Data received from serial port." << std::endl;
             // for (auto it = this->read_buffer_.begin(); it != this->read_buffer_.end(); ++it) {
             //     std::cout << std::hex << static_cast<int>(*it) << " ";
@@ -64,7 +72,11 @@ Eigen::Quaterniond CBoard::imu_at(std::chrono::steady_clock::time_point timestam
         data_ahead_ = data_behind_;
 
     while (true) {
-        queue_.pop(data_behind_);
+        if (!queue_.pop_for(data_behind_, std::chrono::milliseconds(500))) {
+            // Timed out waiting for IMU data; return last known quaternion
+            // (initialized to identity if no data has been received yet)
+            return data_behind_.q.normalized();
+        }
         if (data_behind_.timestamp > timestamp)
             break;
         data_ahead_ = data_behind_;
