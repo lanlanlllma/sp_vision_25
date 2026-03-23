@@ -151,6 +151,7 @@ int main(int argc, char * argv[])
         last_t = t;
       }
       cboard.send(command);
+      tools::logger()->info("Sending command: yaw={}, pitch={}", command.yaw, command.pitch);
 
       data["t"] = t;
       data["cmd_yaw"] = command.yaw * 57.3;

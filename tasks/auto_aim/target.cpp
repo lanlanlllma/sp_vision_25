@@ -94,12 +94,13 @@ void Target::predict(double dt)
   // Piecewise White Noise Model
   // https://github.com/rlabbe/Kalman-and-Bayesian-Filters-in-Python/blob/master/07-Kalman-Filter-Math.ipynb
   double v1, v2;
-  if (name == ArmorName::outpost) {
+  // if (name == ArmorName::outpost) {
+  if (1) {
     v1 = 10;   // 前哨站加速度方差
     v2 = 0.1;  // 前哨站角加速度方差
   } else {
-    v1 = 100;  // 加速度方差
-    v2 = 400;  // 角加速度方差
+    v1 = 10;  // 加速度方差
+    v2 = 40;  // 角加速度方差 
   }
   auto a = dt * dt * dt * dt / 4;
   auto b = dt * dt * dt / 2;

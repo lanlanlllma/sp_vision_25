@@ -67,7 +67,7 @@ int main(int argc, char* argv[]) {
             last_mode = mode;
         }
 
-        recorder.record(img, q, t);
+        // recorder.record(img, q, t);
 
         solver.set_R_gimbal2world(q);
 
@@ -100,6 +100,7 @@ int main(int argc, char* argv[]) {
         Eigen::Quaterniond gimbal_q = q;
         Eigen::Vector3d ypr         = tools::eulers(gimbal_q.toRotationMatrix(), 2, 1, 0);
         auto yaw                    = ypr[0];
+        auto pitch = ypr[1];
 
         tools::draw_text(
             img,
@@ -115,7 +116,7 @@ int main(int argc, char* argv[]) {
         );
         tools::draw_text(
             img,
-            fmt::format("gimbal yaw{:.2f}", yaw * 57.3),
+            fmt::format("gimbal yaw{:.2f} pitch{:.2f}", yaw * 57.3, pitch * 57.3),
             { 10, 90 },
             { 255, 255, 255 }
         );

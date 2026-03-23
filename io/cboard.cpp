@@ -51,8 +51,8 @@ void CBoard::start() {
                 this->read_fun_1(*(Message_phoenix*)this->read_buffer_.data());
                 // std::cout << "Received IMU data." << std::endl;
             } else {
-                // std::cout << "Unknown message type: " << std::hex << static_cast<int>(type)
-                //           << std::dec << std::endl;
+                std::cout << "Unknown message type: " << std::hex << static_cast<int>(type)
+                          << std::dec << std::endl;
             }
         }
     });
@@ -93,8 +93,16 @@ void CBoard::send(Command command) {
     msg.type   = 0xA0;
     GimbalControl msg_body;
     msg_body.find_bools = command.control ? 49 : 48; // '1' or '0'
-    msg_body.yaw        = static_cast<float>(command.yaw);
-    msg_body.pitch      = static_cast<float>(command.pitch);
+    msg_body.yaw        = -(static_cast<float>(command.yaw)+3.14159);
+    //into 0-2pi
+    if (msg_body.yaw < 0) {
+        msg_body.yaw += 2 * 3.14159;
+    }
+    msg_body.pitch      = (static_cast<float>(command.pitch)+3.14159/2);
+    //into 0-2pi
+    if (msg_body.pitch < 0) {
+        msg_body.pitch += 2 * 3.14159;
+    }
     std::memcpy(msg.data, &msg_body, sizeof(GimbalControl));
     msg.tail = 'e';
 
@@ -123,8 +131,15 @@ void CBoard::read_fun_1(Message_phoenix& msg) {
     auto timestamp = std::chrono::steady_clock::now();
 
     Autoaim_s data = reinterpret_cast<Autoaim_s&>(msg.data);
-    float yaw      = data.yaw;
-    float pitch    = data.pitch;
+    float yaw      = (-data.yaw+(3.14159));
+    // into 0-2pi
+    if (yaw < 0) {
+        yaw += 2 * 3.14159;
+    }
+    float pitch    = (data.pitch)-3.14159/2;
+    if (pitch < 0) {
+        pitch += 2 * 3.14159;
+    }
 
     // std::cout << "Yaw: " << yaw << ", Pitch: " << pitch << std::endl;
     Eigen::AngleAxisd yaw_aa(yaw, Eigen::Vector3d::UnitZ());

@@ -56,10 +56,17 @@ void HikRobot::capture_start()
   capturing_ = false;
   capture_quit_ = false;
 
+  // int nRet = MV_CC_Initialize();
+  // if (MV_OK != nRet) {
+  //     printf("Initialize SDK fail! nRet [0x%x]\n", nRet);
+  //     return -1;
+  // }
+
   unsigned int ret;
 
   MV_CC_DEVICE_INFO_LIST device_list;
-  ret = MV_CC_EnumDevices(MV_USB_DEVICE, &device_list);
+  memset(&device_list, 0, sizeof(MV_CC_DEVICE_INFO_LIST));
+  ret = MV_CC_EnumDevices(MV_GIGE_DEVICE | MV_USB_DEVICE, &device_list);
   if (ret != MV_OK) {
     tools::logger()->warn("MV_CC_EnumDevices failed: {:#x}", ret);
     return;
@@ -68,6 +75,9 @@ void HikRobot::capture_start()
   if (device_list.nDeviceNum == 0) {
     tools::logger()->warn("Not found camera!");
     return;
+  }
+  else {
+    tools::logger()->info("Found {} camera(s).", device_list.nDeviceNum);
   }
 
   ret = MV_CC_CreateHandle(&handle_, device_list.pDeviceInfo[0]);
@@ -88,6 +98,7 @@ void HikRobot::capture_start()
   set_float_value("ExposureTime", exposure_us_);
   set_float_value("Gain", gain_);
   MV_CC_SetFrameRate(handle_, 150);
+  MV_CC_SetTriggerMode(handle_, MV_TRIGGER_MODE_OFF);
 
   ret = MV_CC_StartGrabbing(handle_);
   if (ret != MV_OK) {
@@ -107,7 +118,7 @@ void HikRobot::capture_start()
       std::this_thread::sleep_for(1ms);
 
       unsigned int ret;
-      unsigned int nMsec = 100;
+      unsigned int nMsec = 350;
 
       ret = MV_CC_GetImageBuffer(handle_, &raw, nMsec);
       if (ret != MV_OK) {
@@ -226,21 +237,7 @@ void HikRobot::set_vid_pid(const std::string & vid_pid)
 
 void HikRobot::reset_usb() const
 {
-  if (vid_ == -1 || pid_ == -1) return;
-
-  // https://github.com/ralight/usb-reset/blob/master/usb-reset.c
-  auto handle = libusb_open_device_with_vid_pid(NULL, vid_, pid_);
-  if (!handle) {
-    tools::logger()->warn("Unable to open usb!");
-    return;
-  }
-
-  if (libusb_reset_device(handle))
-    tools::logger()->warn("Unable to reset usb!");
-  else
-    tools::logger()->info("Reset usb successfully :)");
-
-  libusb_close(handle);
+  return;
 }
 
 }  // namespace io

@@ -1,5 +1,6 @@
 #include "../include/serial.hpp"
 #include <cstring>
+#include <algorithm>
 
 namespace serial_phoenix {
 
@@ -57,6 +58,8 @@ SerialCode Serial::open(std::string port, std::shared_ptr<SPconfig> config, size
     this->serial_port_->open();
 
     if (this->serial_port_->is_open()) {
+        std::fill(this->read_buffer_.begin(), this->read_buffer_.end(), 0);
+        std::fill(this->write_buffer_.begin(), this->write_buffer_.end(), 0);
         return SerialCode::Value::OK;
     } else {
         return SerialCode::Value::OPEN_FAIL;
@@ -70,8 +73,20 @@ SerialCode Serial::open(std::string port, std::shared_ptr<SPconfig> config, size
         return SerialCode::Value::OPEN_FAIL;
     }
 
-    return (serial_raw_ && serial_raw_->isOpen()) ? SerialCode::Value::OK
-                                                  : SerialCode::Value::OPEN_FAIL;
+    if (serial_raw_ && serial_raw_->isOpen()) {
+        try {
+            // 清空串口设备侧缓存，避免读取到上电或上次会话残留数据
+            serial_raw_->flushInput();
+            serial_raw_->flushOutput();
+        } catch (const std::exception&) {
+            return SerialCode::Value::OPEN_FAIL;
+        }
+
+        std::fill(this->read_buffer_.begin(), this->read_buffer_.end(), 0);
+        std::fill(this->write_buffer_.begin(), this->write_buffer_.end(), 0);
+        return SerialCode::Value::OK;
+    }
+    return SerialCode::Value::OPEN_FAIL;
 #endif
 }
 
